@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.npm-cache/
+.env
+.env.*
+data.json
+sync_manifest.json
