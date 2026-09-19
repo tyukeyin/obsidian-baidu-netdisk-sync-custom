@@ -1,3 +1,4 @@
+import { md5 } from "../crypto/md5";
 import { App, TFile } from "obsidian";
 import { BaiduSyncSettings } from "../settings/settings";
 import { BaiduClient } from "../baidu/client";
@@ -153,6 +154,24 @@ export class SyncEngine {
       this.setState("diffing", "正在检索百度网盘文件列表...");
       const remoteFiles = await this.scanRemoteFiles(settings.remoteBasePath);
 
+      // Bootstrap legacy plaintext histories only with evidence of matching bytes.
+      // Never compare plaintext hashes with encrypted remote bytes.
+      if (!settings.enableE2EE) {
+        const history = this.manifest.getAll();
+        for (const [path, local] of localFiles) {
+          const remote = remoteFiles.get(path);
+          const previous = history[path];
+          if (local.contentHash && remote?.md5 && local.contentHash === remote.md5.toLowerCase()) {
+            this.manifest.set({ path, remotePath: remote.remotePath, mtime: local.mtime,
+              remoteMtime: remote.mtime, size: local.size, remoteSize: remote.size,
+              fsId: remote.fsId, md5: remote.md5, contentHash: local.contentHash });
+          } else if (local.contentHash && previous?.md5 && !previous.contentHash &&
+              local.contentHash === previous.md5.toLowerCase()) {
+            this.manifest.set({ ...previous, contentHash: local.contentHash });
+          }
+        }
+      }
+
       // Step 3: Compute diff plan
       this.setState("diffing", "正在对比差异并裁决冲突 (LWW)...");
       const plans = SyncPlanner.plan(
@@ -181,6 +200,7 @@ export class SyncEngine {
       }
 
       if (plans.length === 0) {
+        await this.manifest.save();
         this.addLog("info", "当前同步方向下无待执行操作");
         this.setState("idle", "同步完成 (无变动)");
         return { success: true, stats };
@@ -255,6 +275,7 @@ export class SyncEngine {
           path: item.path,
           remotePath: item.remotePath,
           mtime: localMtime,
+          contentHash: md5(new Uint8Array(buffer)),
           remoteMtime: (res.mtime || Math.floor(Date.now() / 1000)) * 1000,
           md5: res.md5 || "",
           size: stat?.size || buffer.byteLength,
@@ -290,6 +311,7 @@ export class SyncEngine {
           path: item.path,
           remotePath: item.remotePath,
           mtime: stat?.mtime || Date.now(),
+          contentHash: md5(new Uint8Array(buffer)),
           remoteMtime: item.remote.mtime,
           md5: item.remote.md5 || "",
           size: buffer.byteLength,
@@ -388,6 +410,7 @@ export class SyncEngine {
             path: path,
             remotePath: remotePath,
             mtime: localMtime,
+          contentHash: md5(new Uint8Array(buffer)),
             remoteMtime: (res.mtime || Math.floor(Date.now() / 1000)) * 1000,
             md5: res.md5 || "",
             size: stat?.size || buffer.byteLength,
@@ -437,6 +460,7 @@ export class SyncEngine {
         if (stat && stat.type === "file") {
           result.set(file, {
             path: file,
+            contentHash: md5(new Uint8Array(await adapter.readBinary(file))),
             mtime: stat.mtime,
             size: stat.size
           });

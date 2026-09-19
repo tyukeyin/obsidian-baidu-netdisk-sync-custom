@@ -1,6 +1,7 @@
 import { DataAdapter } from "obsidian";
 
 export interface ManifestItem {
+  contentHash?: string; // Local plaintext hash, separate from encrypted remote MD5.
   path: string;           // Local relative path, e.g. "Folder/Note.md"
   remotePath: string;     // Remote absolute path, e.g. "/apps/obsidian_vault/Folder/Note.md"
   mtime: number;          // Local last modified time in milliseconds

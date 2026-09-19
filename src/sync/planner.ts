@@ -10,6 +10,7 @@ export type SyncActionType =
   | "SKIP";
 
 export interface LocalFileInfo {
+  contentHash?: string;
   path: string;
   mtime: number;
   size: number;
@@ -34,6 +35,14 @@ export interface SyncPlanItem {
   manifest?: ManifestItem;
 }
 
+function localChangedSince(local: LocalFileInfo, manifest: ManifestItem): boolean {
+  if (local.contentHash && manifest.contentHash) return local.contentHash !== manifest.contentHash;
+  return Math.abs(local.mtime - manifest.mtime) > 1000 || local.size !== manifest.size;
+}
+function remoteChangedSince(remote: RemoteFileInfo, manifest: ManifestItem): boolean {
+  if (remote.md5 && manifest.md5) return remote.md5.toLowerCase() !== manifest.md5.toLowerCase();
+  return Math.abs(remote.mtime - manifest.remoteMtime) > 1000 || remote.size !== (manifest.remoteSize ?? manifest.size);
+}
 export class SyncPlanner {
   static plan(
     localFiles: Map<string, LocalFileInfo>,
@@ -65,8 +74,8 @@ export class SyncPlanner {
         const mirror = isMirrorPolicy(policy);
         const source = send ? local : remote;
         const target = send ? remote : local;
-        const localChanged = !manifest || !local || Math.abs(local.mtime - manifest.mtime) > 1000 || local.size !== manifest.size;
-        const remoteChanged = !manifest || !remote || Math.abs(remote.mtime - manifest.remoteMtime) > 1000 || remote.size !== (manifest.remoteSize ?? manifest.size);
+        const localChanged = !manifest || !local || localChangedSince(local, manifest);
+        const remoteChanged = !manifest || !remote || remoteChangedSince(remote, manifest);
         const sourceChanged = send ? localChanged : remoteChanged;
         const targetChanged = send ? remoteChanged : localChanged;
         const item = { path, remotePath, local, remote, manifest };
@@ -116,12 +125,11 @@ export class SyncPlanner {
 
         // With manifest
         const localChanged =
-          Math.abs(local.mtime - manifest.mtime) > 1000 || local.size !== manifest.size;
+          localChangedSince(local, manifest);
         const expectedRemoteSize =
           manifest.remoteSize !== undefined ? manifest.remoteSize : manifest.size;
         const remoteChanged =
-          Math.abs(remote.mtime - manifest.remoteMtime) > 1000 ||
-          remote.size !== expectedRemoteSize;
+          remoteChangedSince(remote, manifest);
 
         if (!localChanged && !remoteChanged) {
           // Both unchanged
@@ -186,7 +194,7 @@ export class SyncPlanner {
         } else {
           // Remote was deleted
           const localChanged =
-            Math.abs(local.mtime - manifest.mtime) > 1000 || local.size !== manifest.size;
+            localChangedSince(local, manifest);
           if (localChanged) {
             // Local was modified after remote deletion, keep local
             plans.push({
@@ -227,8 +235,7 @@ export class SyncPlanner {
           const expectedRemoteSize =
             manifest.remoteSize !== undefined ? manifest.remoteSize : manifest.size;
           const remoteChanged =
-            Math.abs(remote.mtime - manifest.remoteMtime) > 1000 ||
-            remote.size !== expectedRemoteSize;
+            remoteChangedSince(remote, manifest);
           if (remoteChanged) {
             // Remote was modified after local deletion, keep remote
             plans.push({

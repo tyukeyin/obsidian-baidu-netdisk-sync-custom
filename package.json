@@ -1,6 +1,6 @@
 {
   "name": "obsidian-baidu-netdisk-sync",
-  "version": "1.0.14-local.2",
+  "version": "1.0.14-local.3",
   "description": "Free cross-platform multi-device sync with Baidu Netdisk (iOS/Android/Desktop). 免费多端/多设备百度网盘双向同步.",
   "main": "main.js",
   "scripts": {
@@ -8,7 +8,8 @@
     "build": "node esbuild.config.mjs production",
     "test": "npx esbuild tests/verify.ts --bundle --platform=node --outfile=dist/test.js && node dist/test.js",
     "test:engine": "esbuild tests/engine.ts --bundle --platform=node --alias:obsidian=./tests/obsidianMock.ts --outfile=dist/engine-test.js && node dist/engine-test.js",
-    "typecheck": "tsc --noEmit --sourceMap --skipLibCheck"
+    "typecheck": "tsc --noEmit --sourceMap --skipLibCheck",
+    "test:content": "esbuild tests/content.ts --bundle --platform=node --outfile=dist/content.js && node dist/content.js"
   },
   "keywords": [
     "obsidian",

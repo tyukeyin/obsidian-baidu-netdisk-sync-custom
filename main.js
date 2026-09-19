@@ -1220,9 +1220,6 @@ var ManifestManager = class {
   }
 };
 
-// src/sync/engine.ts
-var import_obsidian6 = require("obsidian");
-
 // src/crypto/md5.ts
 function safeAdd(x, y) {
   const lsw = (x & 65535) + (y & 65535);
@@ -1347,6 +1344,9 @@ function md5(buffer) {
   }
   return result;
 }
+
+// src/sync/engine.ts
+var import_obsidian6 = require("obsidian");
 
 // src/baidu/uploader.ts
 var CHUNK_SIZE = 4 * 1024 * 1024;
@@ -1539,6 +1539,14 @@ var AsyncQueue = class {
 };
 
 // src/sync/planner.ts
+function localChangedSince(local, manifest) {
+  if (local.contentHash && manifest.contentHash) return local.contentHash !== manifest.contentHash;
+  return Math.abs(local.mtime - manifest.mtime) > 1e3 || local.size !== manifest.size;
+}
+function remoteChangedSince(remote, manifest) {
+  if (remote.md5 && manifest.md5) return remote.md5.toLowerCase() !== manifest.md5.toLowerCase();
+  return Math.abs(remote.mtime - manifest.remoteMtime) > 1e3 || remote.size !== (manifest.remoteSize ?? manifest.size);
+}
 var SyncPlanner = class {
   static plan(localFiles, remoteFiles, manifestFiles, remoteBasePath, policy = "bidirectional") {
     if (!isSyncPolicy(policy)) throw new Error("\u672A\u77E5\u540C\u6B65\u7B56\u7565\uFF0C\u8BF7\u5728\u8BBE\u7F6E\u4E2D\u91CD\u65B0\u9009\u62E9\u3002");
@@ -1559,8 +1567,8 @@ var SyncPlanner = class {
         const mirror = isMirrorPolicy(policy);
         const source = send ? local : remote;
         const target = send ? remote : local;
-        const localChanged = !manifest || !local || Math.abs(local.mtime - manifest.mtime) > 1e3 || local.size !== manifest.size;
-        const remoteChanged = !manifest || !remote || Math.abs(remote.mtime - manifest.remoteMtime) > 1e3 || remote.size !== (manifest.remoteSize ?? manifest.size);
+        const localChanged = !manifest || !local || localChangedSince(local, manifest);
+        const remoteChanged = !manifest || !remote || remoteChangedSince(remote, manifest);
         const sourceChanged = send ? localChanged : remoteChanged;
         const targetChanged = send ? remoteChanged : localChanged;
         const item = { path, remotePath, local, remote, manifest };
@@ -1603,9 +1611,9 @@ var SyncPlanner = class {
           }
           continue;
         }
-        const localChanged = Math.abs(local.mtime - manifest.mtime) > 1e3 || local.size !== manifest.size;
+        const localChanged = localChangedSince(local, manifest);
         const expectedRemoteSize = manifest.remoteSize !== void 0 ? manifest.remoteSize : manifest.size;
-        const remoteChanged = Math.abs(remote.mtime - manifest.remoteMtime) > 1e3 || remote.size !== expectedRemoteSize;
+        const remoteChanged = remoteChangedSince(remote, manifest);
         if (!localChanged && !remoteChanged) {
           continue;
         } else if (localChanged && !remoteChanged) {
@@ -1663,7 +1671,7 @@ var SyncPlanner = class {
             local
           });
         } else {
-          const localChanged = Math.abs(local.mtime - manifest.mtime) > 1e3 || local.size !== manifest.size;
+          const localChanged = localChangedSince(local, manifest);
           if (localChanged) {
             plans.push({
               path,
@@ -1697,7 +1705,7 @@ var SyncPlanner = class {
           });
         } else {
           const expectedRemoteSize = manifest.remoteSize !== void 0 ? manifest.remoteSize : manifest.size;
-          const remoteChanged = Math.abs(remote.mtime - manifest.remoteMtime) > 1e3 || remote.size !== expectedRemoteSize;
+          const remoteChanged = remoteChangedSince(remote, manifest);
           if (remoteChanged) {
             plans.push({
               path,
@@ -1841,6 +1849,28 @@ var SyncEngine = class {
       const localFiles = await this.scanLocalFiles();
       this.setState("diffing", "\u6B63\u5728\u68C0\u7D22\u767E\u5EA6\u7F51\u76D8\u6587\u4EF6\u5217\u8868...");
       const remoteFiles = await this.scanRemoteFiles(settings.remoteBasePath);
+      if (!settings.enableE2EE) {
+        const history = this.manifest.getAll();
+        for (const [path, local] of localFiles) {
+          const remote = remoteFiles.get(path);
+          const previous = history[path];
+          if (local.contentHash && remote?.md5 && local.contentHash === remote.md5.toLowerCase()) {
+            this.manifest.set({
+              path,
+              remotePath: remote.remotePath,
+              mtime: local.mtime,
+              remoteMtime: remote.mtime,
+              size: local.size,
+              remoteSize: remote.size,
+              fsId: remote.fsId,
+              md5: remote.md5,
+              contentHash: local.contentHash
+            });
+          } else if (local.contentHash && previous?.md5 && !previous.contentHash && local.contentHash === previous.md5.toLowerCase()) {
+            this.manifest.set({ ...previous, contentHash: local.contentHash });
+          }
+        }
+      }
       this.setState("diffing", "\u6B63\u5728\u5BF9\u6BD4\u5DEE\u5F02\u5E76\u88C1\u51B3\u51B2\u7A81 (LWW)...");
       const plans = SyncPlanner.plan(
         localFiles,
@@ -1864,6 +1894,7 @@ var SyncEngine = class {
         }
       }
       if (plans.length === 0) {
+        await this.manifest.save();
         this.addLog("info", "\u5F53\u524D\u540C\u6B65\u65B9\u5411\u4E0B\u65E0\u5F85\u6267\u884C\u64CD\u4F5C");
         this.setState("idle", "\u540C\u6B65\u5B8C\u6210 (\u65E0\u53D8\u52A8)");
         return { success: true, stats };
@@ -1924,6 +1955,7 @@ var SyncEngine = class {
           path: item.path,
           remotePath: item.remotePath,
           mtime: localMtime,
+          contentHash: md5(new Uint8Array(buffer)),
           remoteMtime: (res.mtime || Math.floor(Date.now() / 1e3)) * 1e3,
           md5: res.md5 || "",
           size: stat?.size || buffer.byteLength,
@@ -1953,6 +1985,7 @@ var SyncEngine = class {
           path: item.path,
           remotePath: item.remotePath,
           mtime: stat?.mtime || Date.now(),
+          contentHash: md5(new Uint8Array(buffer)),
           remoteMtime: item.remote.mtime,
           md5: item.remote.md5 || "",
           size: buffer.byteLength,
@@ -2031,6 +2064,7 @@ var SyncEngine = class {
             path,
             remotePath,
             mtime: localMtime,
+            contentHash: md5(new Uint8Array(buffer)),
             remoteMtime: (res.mtime || Math.floor(Date.now() / 1e3)) * 1e3,
             md5: res.md5 || "",
             size: stat?.size || buffer.byteLength,
@@ -2072,6 +2106,7 @@ var SyncEngine = class {
         if (stat && stat.type === "file") {
           result.set(file, {
             path: file,
+            contentHash: md5(new Uint8Array(await adapter.readBinary(file))),
             mtime: stat.mtime,
             size: stat.size
           });
