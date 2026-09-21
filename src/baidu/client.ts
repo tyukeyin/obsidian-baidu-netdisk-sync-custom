@@ -70,7 +70,7 @@ export class BaiduClient {
     throw (lastError instanceof Error ? lastError : new Error(String(lastError)));
   }
 
-  async listAll(rootPath: string): Promise<BaiduFileItem[]> {
+  async listAll(rootPath: string, allowMissingRoot = false): Promise<BaiduFileItem[]> {
     const token = await this.oauth.refreshTokenIfNeeded();
     const cleanPath = rootPath.endsWith("/") ? rootPath.slice(0, -1) : rootPath;
     const allFiles: BaiduFileItem[] = [];
@@ -99,11 +99,12 @@ export class BaiduClient {
         const data = resp.json as unknown as BaiduListResponse;
         // errno -9: path does not exist; errno 31066: directory not found; errno 20020: empty/uninitialized path
         if (data.errno === -9 || data.errno === 31066 || data.errno === 20020) {
+          if (!allowMissingRoot || currentDir !== cleanPath) throw new Error("云端目录缺失或扫描中发生变化，本轮停止，不能据此推断删除");
           hasMore = false;
           break;
         }
 
-        if (data.errno !== 0 && data.errno !== undefined) {
+        if (data.errno !== 0) {
           throw new Error(`获取网盘列表返回异常 (errno: ${data.errno})`);
         }
 
@@ -121,7 +122,7 @@ export class BaiduClient {
             start += limit;
           }
         } else {
-          hasMore = false;
+          throw new Error("云端返回不完整文件列表，停止同步");
         }
       }
     }

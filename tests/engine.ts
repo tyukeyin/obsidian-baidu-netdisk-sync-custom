@@ -16,10 +16,11 @@ async function run() {
     let approvals = 0;
     let scans = 0;
     let selections = 0;
+    let localBytes = new ArrayBuffer(10);
     const app = { vault: { configDir: ".obsidian", adapter: {
-      exists: async () => true, readBinary: async () => new ArrayBuffer(10),
+      exists: async () => !options.missingLocal, readBinary: async () => localBytes,
       stat: async () => local,
-      writeBinary: async () => { effects.push("download"); },
+      writeBinary: async (_: string, data: ArrayBuffer) => { localBytes = data; effects.push("download"); },
       trashLocal: async () => { effects.push("deleteLocal"); }
     }, getAbstractFileByPath: () => null } } as unknown as App;
     const manifest = { load: async () => {}, getAll: () => ({ "note.md": baseline }),

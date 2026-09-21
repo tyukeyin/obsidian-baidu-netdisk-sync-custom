@@ -950,7 +950,7 @@ var BaiduClient = class {
     }
     throw lastError instanceof Error ? lastError : new Error(String(lastError));
   }
-  async listAll(rootPath) {
+  async listAll(rootPath, allowMissingRoot = false) {
     const token = await this.oauth.refreshTokenIfNeeded();
     const cleanPath = rootPath.endsWith("/") ? rootPath.slice(0, -1) : rootPath;
     const allFiles = [];
@@ -973,10 +973,11 @@ var BaiduClient = class {
         }
         const data = resp.json;
         if (data.errno === -9 || data.errno === 31066 || data.errno === 20020) {
+          if (!allowMissingRoot || currentDir !== cleanPath) throw new Error("\u4E91\u7AEF\u76EE\u5F55\u7F3A\u5931\u6216\u626B\u63CF\u4E2D\u53D1\u751F\u53D8\u5316\uFF0C\u672C\u8F6E\u505C\u6B62\uFF0C\u4E0D\u80FD\u636E\u6B64\u63A8\u65AD\u5220\u9664");
           hasMore = false;
           break;
         }
-        if (data.errno !== 0 && data.errno !== void 0) {
+        if (data.errno !== 0) {
           throw new Error(`\u83B7\u53D6\u7F51\u76D8\u5217\u8868\u8FD4\u56DE\u5F02\u5E38 (errno: ${data.errno})`);
         }
         if (data.list && Array.isArray(data.list)) {
@@ -993,7 +994,7 @@ var BaiduClient = class {
             start += limit;
           }
         } else {
-          hasMore = false;
+          throw new Error("\u4E91\u7AEF\u8FD4\u56DE\u4E0D\u5B8C\u6574\u6587\u4EF6\u5217\u8868\uFF0C\u505C\u6B62\u540C\u6B65");
         }
       }
     }
@@ -1174,12 +1175,7 @@ var ManifestManager = class {
         }
       }
     } catch (err) {
-      console.warn("[BaiduSync] \u52A0\u8F7D sync_manifest \u5931\u8D25\uFF0C\u5C06\u4F7F\u7528\u7A7A\u6E05\u5355:", err);
-      this.manifest = {
-        version: 1,
-        lastSyncTime: 0,
-        files: {}
-      };
+      throw new Error("\u65E0\u6CD5\u8BFB\u53D6\u540C\u6B65\u5386\u53F2\uFF0C\u5DF2\u505C\u6B62\u540C\u6B65\uFF0C\u8BF7\u4FDD\u7559 sync_manifest.json \u5E76\u68C0\u67E5\u6587\u4EF6\u3002");
     }
     return this.manifest;
   }
@@ -1197,7 +1193,7 @@ var ManifestManager = class {
         JSON.stringify(this.manifest, null, 2)
       );
     } catch (err) {
-      console.error("[BaiduSync] \u4FDD\u5B58 sync_manifest \u5931\u8D25:", err);
+      throw new Error("\u65E0\u6CD5\u4FDD\u5B58\u540C\u6B65\u5386\u53F2\uFF0C\u5DF2\u505C\u6B62\u540E\u7EED\u6E05\u7406\u64CD\u4F5C\u3002");
     }
   }
   get(path) {
@@ -1848,7 +1844,10 @@ var SyncEngine = class {
       this.setState("diffing", "\u6B63\u5728\u626B\u63CF\u672C\u5730\u6587\u4EF6...");
       const localFiles = await this.scanLocalFiles();
       this.setState("diffing", "\u6B63\u5728\u68C0\u7D22\u767E\u5EA6\u7F51\u76D8\u6587\u4EF6\u5217\u8868...");
-      const remoteFiles = await this.scanRemoteFiles(settings.remoteBasePath);
+      const remoteFiles = await this.scanRemoteFiles(
+        settings.remoteBasePath,
+        Object.keys(this.manifest.getAll()).length === 0 && policy !== "receive" && policy !== "mirrorReceive"
+      );
       if (!settings.enableE2EE) {
         const history = this.manifest.getAll();
         for (const [path, local] of localFiles) {
@@ -1902,9 +1901,24 @@ var SyncEngine = class {
       this.addLog("info", `\u89C4\u5212\u5B8C\u6210\uFF0C\u5F85\u6267\u884C\u64CD\u4F5C\u6570: ${plans.length}`);
       this.setState("syncing", `\u540C\u6B65\u4E2D (0/${plans.length})...`);
       let processed = 0;
-      for (const item of plans) {
+      const orderedPlans = [...plans].sort((a, b) => Number(a.action.startsWith("DELETE") || a.action === "CLEAN_MANIFEST") - Number(b.action.startsWith("DELETE") || b.action === "CLEAN_MANIFEST"));
+      let deletionChecked = false;
+      for (const item of orderedPlans) {
         await this.queue.add(async () => {
           try {
+            if (item.action.startsWith("DELETE") || item.action === "CLEAN_MANIFEST") {
+              if (stats.errors) throw new Error("\u524D\u5E8F\u64CD\u4F5C\u5931\u8D25\uFF0C\u4FDD\u7559\u65E7\u8DEF\u5F84\uFF0C\u5F85\u4E0B\u6B21\u540C\u6B65\u91CD\u8BD5");
+              if (!deletionChecked) {
+                await this.manifest.save();
+                const freshRemote = await this.scanRemoteFiles(settings.remoteBasePath);
+                for (const removal of orderedPlans.filter((p) => p.action.startsWith("DELETE"))) {
+                  const fresh = freshRemote.get(removal.path);
+                  if (removal.action === "DELETE_LOCAL" && fresh) throw new Error("\u4E91\u7AEF\u8DEF\u5F84\u91CD\u65B0\u51FA\u73B0\uFF0C\u505C\u6B62\u6E05\u7406");
+                  if (removal.action === "DELETE_REMOTE" && (!fresh || fresh.mtime !== removal.remote?.mtime || fresh.size !== removal.remote?.size || fresh.md5 !== removal.remote?.md5)) throw new Error("\u4E91\u7AEF\u6587\u4EF6\u53D1\u751F\u53D8\u5316\uFF0C\u505C\u6B62\u6E05\u7406");
+                }
+                deletionChecked = true;
+              }
+            }
             if (this.getSettings().syncPolicy !== configuredPolicy || this.getSettings().remoteBasePath !== settings.remoteBasePath) throw new Error("\u540C\u6B65\u8BBE\u7F6E\u5DF2\u6539\u53D8\uFF0C\u8BF7\u91CD\u65B0\u540C\u6B65");
             if (!allowsAction(policy, item.action)) throw new Error("\u540C\u6B65\u65B9\u5411\u7981\u6B62\u6267\u884C\u6B64\u64CD\u4F5C");
             await this.executePlanItem(item, settings);
@@ -1942,9 +1956,10 @@ var SyncEngine = class {
     switch (item.action) {
       case "UPLOAD": {
         if (!await adapter.exists(item.path)) {
-          return;
+          throw new Error("\u5F85\u4E0A\u4F20\u6587\u4EF6\u5DF2\u79FB\u52A8\u6216\u5220\u9664\uFF0C\u8BF7\u91CD\u65B0\u540C\u6B65");
         }
         const buffer = await adapter.readBinary(item.path);
+        if (item.local?.contentHash && md5(new Uint8Array(buffer)) !== item.local.contentHash) throw new Error("\u626B\u63CF\u540E\u672C\u5730\u5185\u5BB9\u5DF2\u53D8\u5316\uFF0C\u8BF7\u91CD\u65B0\u540C\u6B65");
         const stat = await adapter.stat(item.path);
         const localMtime = stat?.mtime || Date.now();
         const res = await this.uploader.uploadFile(item.remotePath, buffer, {
@@ -1972,14 +1987,16 @@ var SyncEngine = class {
         const buffer = await this.downloader.downloadByFsId(item.remote.fsId, {
           e2eePassword: settings.e2eePassword
         });
-        const lastSlash = item.path.lastIndexOf("/");
-        if (lastSlash > 0) {
-          const dir = item.path.substring(0, lastSlash);
+        const segments = item.path.split("/");
+        for (let i = 1; i < segments.length; i++) {
+          const dir = segments.slice(0, i).join("/");
           if (!await adapter.exists(dir)) {
             await adapter.mkdir(dir);
           }
         }
+        await this.assertLocalUnchanged(item);
         await adapter.writeBinary(item.path, buffer);
+        if (md5(new Uint8Array(await adapter.readBinary(item.path))) !== md5(new Uint8Array(buffer))) throw new Error("\u4E0B\u8F7D\u6587\u4EF6\u843D\u76D8\u6821\u9A8C\u5931\u8D25\uFF0C\u4FDD\u7559\u65E7\u8DEF\u5F84");
         const stat = await adapter.stat(item.path);
         this.manifest.set({
           path: item.path,
@@ -1996,6 +2013,7 @@ var SyncEngine = class {
         break;
       }
       case "DELETE_LOCAL": {
+        await this.assertLocalUnchanged(item);
         if (await adapter.exists(item.path)) {
           const file = this.app.vault.getAbstractFileByPath(item.path);
           if (file && file instanceof import_obsidian6.TFile) {
@@ -2006,9 +2024,11 @@ var SyncEngine = class {
           this.addLog("info", `\u79FB\u5165\u672C\u5730\u56DE\u6536\u7AD9: ${item.path}`);
         }
         this.manifest.delete(item.path);
+        await this.pruneEmptyParents(item.path);
         break;
       }
       case "DELETE_REMOTE": {
+        if (await adapter.exists(item.path)) throw new Error("\u672C\u5730\u8DEF\u5F84\u5DF2\u91CD\u65B0\u51FA\u73B0\uFF0C\u505C\u6B62\u5220\u9664\u4E91\u7AEF\u6587\u4EF6");
         await this.client.deleteFiles([item.remotePath]);
         this.manifest.delete(item.path);
         this.addLog("info", `\u79FB\u5165\u7F51\u76D8\u56DE\u6536\u7AD9: ${item.path}`);
@@ -2020,6 +2040,27 @@ var SyncEngine = class {
       }
       default:
         break;
+    }
+  }
+  async assertLocalUnchanged(item) {
+    const adapter = this.app.vault.adapter;
+    const exists = await adapter.exists(item.path);
+    if (!item.local && exists) throw new Error("\u672C\u5730\u51FA\u73B0\u65B0\u6587\u4EF6\uFF0C\u4FDD\u7559\u5E76\u7B49\u5F85\u91CD\u65B0\u540C\u6B65");
+    if (item.local?.contentHash && (!exists || md5(new Uint8Array(await adapter.readBinary(item.path))) !== item.local.contentHash)) {
+      throw new Error("\u672C\u5730\u5185\u5BB9\u5DF2\u53D8\u5316\uFF0C\u4FDD\u7559\u5E76\u7B49\u5F85\u91CD\u65B0\u540C\u6B65");
+    }
+  }
+  async pruneEmptyParents(path) {
+    const adapter = this.app.vault.adapter;
+    let dir = path.slice(0, path.lastIndexOf("/"));
+    if (!path.includes("/")) return;
+    while (dir && !this.filter.shouldIgnore(dir) && dir !== this.app.vault.configDir && !dir.startsWith(this.app.vault.configDir + "/")) {
+      const children = await adapter.list(dir);
+      if (children.files.length || children.folders.length) break;
+      await adapter.rmdir(dir, false);
+      this.addLog("info", `\u6E05\u7406\u65E7\u7A7A\u76EE\u5F55: ${dir}`);
+      if (!dir.includes("/")) break;
+      dir = dir.slice(0, dir.lastIndexOf("/"));
     }
   }
   async convertVaultToPlaintext(onProgress) {
@@ -2127,21 +2168,23 @@ var SyncEngine = class {
     }
     return result;
   }
-  async scanRemoteFiles(remoteBasePath) {
+  async scanRemoteFiles(remoteBasePath, allowMissingRoot = false) {
     const result = /* @__PURE__ */ new Map();
     const cleanBase = remoteBasePath.endsWith("/") ? remoteBasePath.slice(0, -1) : remoteBasePath;
-    const items = await this.client.listAll(cleanBase);
+    const items = await this.client.listAll(cleanBase, allowMissingRoot);
     for (const item of items) {
       if (item.isdir === 1) {
         continue;
       }
       let relativePath = item.path;
+      if (!relativePath.startsWith(cleanBase + "/")) throw new Error("\u4E91\u7AEF\u8FD4\u56DE\u540C\u6B65\u76EE\u5F55\u5916\u7684\u8DEF\u5F84\uFF0C\u505C\u6B62\u540C\u6B65");
       if (relativePath.startsWith(cleanBase)) {
         relativePath = relativePath.slice(cleanBase.length);
       }
       if (relativePath.startsWith("/")) {
         relativePath = relativePath.slice(1);
       }
+      if (relativePath.split("/").some((part) => !part || part === "." || part === "..") || relativePath.includes("\\")) throw new Error("\u4E91\u7AEF\u8DEF\u5F84\u65E0\u6548\uFF0C\u505C\u6B62\u540C\u6B65");
       if (this.filter.shouldIgnore(relativePath)) {
         continue;
       }
@@ -2345,13 +2388,51 @@ function choosePolicy(app, initial) {
   });
 }
 
+// src/sync/changeScheduler.ts
+var ChangeScheduler = class {
+  constructor(enabled, busy, run, delay) {
+    this.enabled = enabled;
+    this.busy = busy;
+    this.run = run;
+    this.delay = delay;
+    this.dirty = false;
+    this.disposed = false;
+  }
+  changed() {
+    if (this.disposed || !this.enabled()) return;
+    this.dirty = true;
+    this.idle();
+  }
+  idle() {
+    if (this.disposed || !this.dirty || !this.enabled() || this.busy()) return;
+    if (this.timer !== void 0) clearTimeout(this.timer);
+    this.timer = setTimeout(() => {
+      void this.flush();
+    }, this.delay());
+  }
+  async flush() {
+    this.timer = void 0;
+    if (this.disposed || !this.enabled() || this.busy()) return;
+    this.dirty = false;
+    try {
+      const result = await this.run();
+      if (!result.success) this.dirty = true;
+    } catch {
+      this.dirty = true;
+    }
+  }
+  dispose() {
+    this.disposed = true;
+    if (this.timer !== void 0) clearTimeout(this.timer);
+  }
+};
+
 // src/main.ts
 var BaiduSyncPlugin = class extends import_obsidian10.Plugin {
   constructor() {
     super(...arguments);
     this.settings = DEFAULT_SETTINGS;
     this.intervalId = null;
-    this.saveDebounceTimer = null;
     this.ribbonIconEl = null;
   }
   async onload() {
@@ -2393,6 +2474,7 @@ var BaiduSyncPlugin = class extends import_obsidian10.Plugin {
       }
     });
     this.engine.onStateChange((state) => {
+      if (state === "idle") this.changes?.idle();
       if (this.ribbonIconEl) {
         if (state === "syncing" || state === "diffing" || state === "preparing") {
           this.ribbonIconEl.addClass("baidu-sync-spinning");
@@ -2424,10 +2506,7 @@ var BaiduSyncPlugin = class extends import_obsidian10.Plugin {
       window.clearInterval(this.intervalId);
       this.intervalId = null;
     }
-    if (this.saveDebounceTimer !== null) {
-      window.clearTimeout(this.saveDebounceTimer);
-      this.saveDebounceTimer = null;
-    }
+    this.changes?.dispose();
   }
   async loadSettings() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
@@ -2450,6 +2529,12 @@ var BaiduSyncPlugin = class extends import_obsidian10.Plugin {
     }
   }
   setupTriggers() {
+    this.changes = new ChangeScheduler(
+      () => this.settings.syncOnSave && !!this.settings.accessToken && !isMirrorPolicy(this.settings.syncPolicy),
+      () => this.engine.isSyncing(),
+      () => this.engine.startSync(true),
+      () => (this.settings.syncDebounceSeconds || 5) * 1e3
+    );
     if (this.settings.syncOnStartup && this.settings.accessToken) {
       window.setTimeout(async () => {
         await this.engine.startSync(true);
@@ -2458,18 +2543,12 @@ var BaiduSyncPlugin = class extends import_obsidian10.Plugin {
     this.resetInterval();
     const onVaultChange = (file) => {
       if (!this.settings.syncOnSave || !this.settings.accessToken) return;
-      if (this.engine.isSyncing()) return;
       if (file.path.includes("sync_manifest.json") || file.path.includes("workspace")) return;
-      if (this.saveDebounceTimer !== null) {
-        window.clearTimeout(this.saveDebounceTimer);
-      }
-      const debounceMs = (this.settings.syncDebounceSeconds || 5) * 1e3;
-      this.saveDebounceTimer = window.setTimeout(async () => {
-        await this.engine.startSync(true);
-      }, debounceMs);
+      this.changes?.changed();
     };
     this.registerEvent(this.app.vault.on("modify", onVaultChange));
     this.registerEvent(this.app.vault.on("create", onVaultChange));
     this.registerEvent(this.app.vault.on("delete", onVaultChange));
+    this.registerEvent(this.app.vault.on("rename", onVaultChange));
   }
 };

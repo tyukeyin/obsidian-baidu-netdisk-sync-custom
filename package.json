@@ -1,6 +1,6 @@
 {
   "name": "obsidian-baidu-netdisk-sync",
-  "version": "1.0.14-local.3",
+  "version": "1.0.14-local.4",
   "description": "Free cross-platform multi-device sync with Baidu Netdisk (iOS/Android/Desktop). 免费多端/多设备百度网盘双向同步.",
   "main": "main.js",
   "scripts": {
@@ -9,7 +9,10 @@
     "test": "npx esbuild tests/verify.ts --bundle --platform=node --outfile=dist/test.js && node dist/test.js",
     "test:engine": "esbuild tests/engine.ts --bundle --platform=node --alias:obsidian=./tests/obsidianMock.ts --outfile=dist/engine-test.js && node dist/engine-test.js",
     "typecheck": "tsc --noEmit --sourceMap --skipLibCheck",
-    "test:content": "esbuild tests/content.ts --bundle --platform=node --outfile=dist/content.js && node dist/content.js"
+    "test:content": "esbuild tests/content.ts --bundle --platform=node --outfile=dist/content.js && node dist/content.js",
+    "test:structure": "esbuild tests/structure.ts --bundle --platform=node --alias:obsidian=./tests/obsidianMock.ts --outfile=dist/structure.js && node dist/structure.js",
+    "test:scheduler": "esbuild tests/scheduler.ts --bundle --platform=node --alias:obsidian=./tests/obsidianMock.ts --outfile=dist/scheduler.js && node dist/scheduler.js",
+    "test:cloudListing": "esbuild tests/cloudListing.ts --bundle --platform=node --alias:obsidian=./tests/obsidianMock.ts --outfile=dist/cloudListing.js && node dist/cloudListing.js"
   },
   "keywords": [
     "obsidian",

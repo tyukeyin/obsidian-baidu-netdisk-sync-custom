@@ -152,7 +152,8 @@ export class SyncEngine {
 
       // Step 2: Scan remote files
       this.setState("diffing", "正在检索百度网盘文件列表...");
-      const remoteFiles = await this.scanRemoteFiles(settings.remoteBasePath);
+      const remoteFiles = await this.scanRemoteFiles(settings.remoteBasePath,
+        Object.keys(this.manifest.getAll()).length === 0 && policy !== "receive" && policy !== "mirrorReceive");
 
       // Bootstrap legacy plaintext histories only with evidence of matching bytes.
       // Never compare plaintext hashes with encrypted remote bytes.
@@ -212,9 +213,27 @@ export class SyncEngine {
       this.setState("syncing", `同步中 (0/${plans.length})...`);
       let processed = 0;
 
-      for (const item of plans) {
+      const orderedPlans = [...plans].sort((a, b) =>
+        Number(a.action.startsWith("DELETE") || a.action === "CLEAN_MANIFEST") -
+        Number(b.action.startsWith("DELETE") || b.action === "CLEAN_MANIFEST"));
+      let deletionChecked = false;
+      for (const item of orderedPlans) {
         await this.queue.add(async () => {
           try {
+            if (item.action.startsWith("DELETE") || item.action === "CLEAN_MANIFEST") {
+              if (stats.errors) throw new Error("前序操作失败，保留旧路径，待下次同步重试");
+              if (!deletionChecked) {
+                // Persist new paths before removing any old copy.
+                await this.manifest.save();
+                const freshRemote = await this.scanRemoteFiles(settings.remoteBasePath);
+                for (const removal of orderedPlans.filter(p => p.action.startsWith("DELETE"))) {
+                  const fresh = freshRemote.get(removal.path);
+                  if (removal.action === "DELETE_LOCAL" && fresh) throw new Error("云端路径重新出现，停止清理");
+                  if (removal.action === "DELETE_REMOTE" && (!fresh || fresh.mtime !== removal.remote?.mtime || fresh.size !== removal.remote?.size || fresh.md5 !== removal.remote?.md5)) throw new Error("云端文件发生变化，停止清理");
+                }
+                deletionChecked = true;
+              }
+            }
             if (this.getSettings().syncPolicy !== configuredPolicy || this.getSettings().remoteBasePath !== settings.remoteBasePath) throw new Error("同步设置已改变，请重新同步");
             if (!allowsAction(policy, item.action)) throw new Error("同步方向禁止执行此操作");
             await this.executePlanItem(item, settings);
@@ -260,9 +279,10 @@ export class SyncEngine {
     switch (item.action) {
       case "UPLOAD": {
         if (!(await adapter.exists(item.path))) {
-          return;
+          throw new Error("待上传文件已移动或删除，请重新同步");
         }
         const buffer = await adapter.readBinary(item.path);
+        if (item.local?.contentHash && md5(new Uint8Array(buffer)) !== item.local.contentHash) throw new Error("扫描后本地内容已变化，请重新同步");
         const stat = await adapter.stat(item.path);
         const localMtime = stat?.mtime || Date.now();
 
@@ -296,15 +316,17 @@ export class SyncEngine {
         });
 
         // Ensure parent directory exists
-        const lastSlash = item.path.lastIndexOf("/");
-        if (lastSlash > 0) {
-          const dir = item.path.substring(0, lastSlash);
+        const segments = item.path.split("/");
+        for (let i = 1; i < segments.length; i++) {
+          const dir = segments.slice(0, i).join("/");
           if (!(await adapter.exists(dir))) {
             await adapter.mkdir(dir);
           }
         }
 
+        await this.assertLocalUnchanged(item);
         await adapter.writeBinary(item.path, buffer);
+        if (md5(new Uint8Array(await adapter.readBinary(item.path))) !== md5(new Uint8Array(buffer))) throw new Error("下载文件落盘校验失败，保留旧路径");
         const stat = await adapter.stat(item.path);
 
         this.manifest.set({
@@ -323,6 +345,7 @@ export class SyncEngine {
       }
 
       case "DELETE_LOCAL": {
+        await this.assertLocalUnchanged(item);
         if (await adapter.exists(item.path)) {
           const file = this.app.vault.getAbstractFileByPath(item.path);
           if (file && file instanceof TFile) {
@@ -334,10 +357,12 @@ export class SyncEngine {
           this.addLog("info", `移入本地回收站: ${item.path}`);
         }
         this.manifest.delete(item.path);
+        await this.pruneEmptyParents(item.path);
         break;
       }
 
       case "DELETE_REMOTE": {
+        if (await adapter.exists(item.path)) throw new Error("本地路径已重新出现，停止删除云端文件");
         await this.client.deleteFiles([item.remotePath]);
         this.manifest.delete(item.path);
         this.addLog("info", `移入网盘回收站: ${item.path}`);
@@ -351,6 +376,29 @@ export class SyncEngine {
 
       default:
         break;
+    }
+  }
+
+  private async assertLocalUnchanged(item: SyncPlanItem): Promise<void> {
+    const adapter = this.app.vault.adapter;
+    const exists = await adapter.exists(item.path);
+    if (!item.local && exists) throw new Error("本地出现新文件，保留并等待重新同步");
+    if (item.local?.contentHash && (!exists || md5(new Uint8Array(await adapter.readBinary(item.path))) !== item.local.contentHash)) {
+      throw new Error("本地内容已变化，保留并等待重新同步");
+    }
+  }
+
+  private async pruneEmptyParents(path: string): Promise<void> {
+    const adapter = this.app.vault.adapter;
+    let dir = path.slice(0, path.lastIndexOf("/"));
+    if (!path.includes("/")) return;
+    while (dir && !this.filter.shouldIgnore(dir) && dir !== this.app.vault.configDir && !dir.startsWith(this.app.vault.configDir + "/")) {
+      const children = await adapter.list(dir);
+      if (children.files.length || children.folders.length) break;
+      await adapter.rmdir(dir, false);
+      this.addLog("info", `清理旧空目录: ${dir}`);
+      if (!dir.includes("/")) break;
+      dir = dir.slice(0, dir.lastIndexOf("/"));
     }
   }
 
@@ -488,11 +536,11 @@ export class SyncEngine {
     return result;
   }
 
-  private async scanRemoteFiles(remoteBasePath: string): Promise<Map<string, RemoteFileInfo>> {
+  private async scanRemoteFiles(remoteBasePath: string, allowMissingRoot = false): Promise<Map<string, RemoteFileInfo>> {
     const result = new Map<string, RemoteFileInfo>();
     const cleanBase = remoteBasePath.endsWith("/") ? remoteBasePath.slice(0, -1) : remoteBasePath;
 
-    const items = await this.client.listAll(cleanBase);
+    const items = await this.client.listAll(cleanBase, allowMissingRoot);
 
     for (const item of items) {
       if (item.isdir === 1) {
@@ -500,12 +548,14 @@ export class SyncEngine {
       }
 
       let relativePath = item.path;
+      if (!relativePath.startsWith(cleanBase + "/")) throw new Error("云端返回同步目录外的路径，停止同步");
       if (relativePath.startsWith(cleanBase)) {
         relativePath = relativePath.slice(cleanBase.length);
       }
       if (relativePath.startsWith("/")) {
         relativePath = relativePath.slice(1);
       }
+      if (relativePath.split("/").some(part => !part || part === "." || part === "..") || relativePath.includes("\\")) throw new Error("云端路径无效，停止同步");
 
       if (this.filter.shouldIgnore(relativePath)) {
         continue;
