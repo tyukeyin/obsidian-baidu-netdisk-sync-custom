@@ -1,3 +1,5 @@
+> **此仓库发布的是个人定制版 1.0.14-local.6，不是上游官方版本。** BRAT 安装和升级请先看 [定制版说明](CUSTOM_README.md) 与 [版本维护说明](LOCAL_BUILD.md)。以下保留上游 README。
+
 # Baidu Netdisk Sync (百度网盘多端同步)
 
 [![Obsidian Plugin](https://img.shields.io/badge/Obsidian-Community%20Plugin-7C3AED?logo=obsidian&logoColor=white)](https://obsidian.md/plugins?id=baidu-netdisk-sync)

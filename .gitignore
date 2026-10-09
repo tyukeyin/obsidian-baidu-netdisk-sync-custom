@@ -9,3 +9,7 @@ dist/
 .npm-cache/
 
 /local-backups/
+
+# Device-specific credentials and sync state
+data.json
+sync_manifest.json

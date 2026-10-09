@@ -28,7 +28,15 @@ jobs:
         run: npm ci || npm install
 
       - name: Run unit tests
-        run: npm test
+        run: |
+          npm test
+          npm run test:engine
+          npm run test:content
+          npm run test:structure
+          npm run test:scheduler
+          npm run test:cloudListing
+          npm run test:listing
+          npm run typecheck
 
       - name: Build plugin bundle
         run: npm run build
