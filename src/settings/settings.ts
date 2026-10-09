@@ -1,4 +1,8 @@
+import type { SyncPolicy } from "../sync/policy";
+
 export interface BaiduSyncSettings {
+  syncPolicy: SyncPolicy;
+  lastManualPolicy?: SyncPolicy;
   appKey: string;
   appSecret: string;
   accessToken: string;
@@ -15,11 +19,13 @@ export interface BaiduSyncSettings {
   // Sync Scope
   syncObsidianConfig: boolean;
   syncPlugins: boolean;
+  syncPluginIds: string; // Comma- or newline-separated plugin IDs allowed while syncPlugins is off
   syncThemes: boolean;
   ignoredPatterns: string; // Newline separated patterns
 
   // Concurrency and Network
   concurrency: number; // 1 to 5, default 3
+  listingConcurrency: number; // directory listing only, 1 to 3, default 2
 
   // E2EE
   enableE2EE: boolean;
@@ -30,6 +36,7 @@ export interface BaiduSyncSettings {
 }
 
 export const DEFAULT_SETTINGS: BaiduSyncSettings = {
+  syncPolicy: "bidirectional",
   appKey: "",
   appSecret: "",
   accessToken: "",
@@ -44,6 +51,7 @@ export const DEFAULT_SETTINGS: BaiduSyncSettings = {
 
   syncObsidianConfig: true,
   syncPlugins: true,
+  syncPluginIds: "baidu-pan-video-keys",
   syncThemes: true,
   ignoredPatterns: [
     "**/.git/**",
@@ -55,6 +63,7 @@ export const DEFAULT_SETTINGS: BaiduSyncSettings = {
   ].join("\n"),
 
   concurrency: 3,
+  listingConcurrency: 2,
 
   enableE2EE: false,
   e2eePassword: "",

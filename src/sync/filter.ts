@@ -32,6 +32,7 @@ function globToRegex(glob: string): RegExp {
 
 export class SyncFilter {
   private compiledPatterns: RegExp[] = [];
+  private subtreePatterns: RegExp[] = [];
 
   constructor(private settings: BaiduSyncSettings, private configDir: string = "") {
     this.recompilePatterns();
@@ -44,17 +45,45 @@ export class SyncFilter {
 
   private recompilePatterns(): void {
     this.compiledPatterns = [];
+    this.subtreePatterns = [];
     const lines = this.settings.ignoredPatterns.split("\n");
     for (const line of lines) {
       const trimmed = line.trim();
       if (trimmed && !trimmed.startsWith("#")) {
         try {
-          this.compiledPatterns.push(globToRegex(trimmed));
+          const pattern = globToRegex(trimmed);
+          this.compiledPatterns.push(pattern);
+          if (trimmed.endsWith("/**")) this.subtreePatterns.push(pattern);
         } catch {
           // ignore invalid patterns
         }
       }
     }
+  }
+
+  // Only prune a subtree when all its descendants are out of scope.
+  // File-only patterns must not hide allowed files such as PDF attachments.
+  shouldSkipDirectory(relativePath: string): boolean {
+    const path = relativePath.replace(/\\/g, '/').replace(/\/+$/, '');
+    const parts = path.split('/');
+    if (path.includes('baidu-netdisk-sync') || path.includes('obsidian-baidu-netdisk-sync') ||
+        parts.includes('.git') || parts[0] === '.trash') return true;
+    const config = this.configDir.replace(/\\/g, '/').replace(/\/+$/, '');
+    if (config && (path === config || path.startsWith(config + '/'))) {
+      if (!this.settings.syncObsidianConfig) return true;
+      if ((path + '/').includes('/cache/') || (path + '/').includes('/indexeddb/')) return true;
+      const selected = (this.settings.syncPluginIds || '').split(/[,\n]/).map(id => id.trim())
+        .filter(id => /^[a-z0-9][a-z0-9-]*$/.test(id));
+      if (!this.settings.syncPlugins) {
+        if (path === config + '/plugins' && selected.length === 0) return true;
+        if (path.startsWith(config + '/plugins/')) {
+          const id = path.slice((config + '/plugins/').length).split('/')[0];
+          if (!selected.includes(id)) return true;
+        }
+      }
+      if (!this.settings.syncThemes && (path === config + '/themes' || path.startsWith(config + '/themes/'))) return true;
+    }
+    return this.subtreePatterns.some(pattern => pattern.test(path + '/'));
   }
 
   shouldIgnore(relativePath: string): boolean {
@@ -98,9 +127,15 @@ export class SyncFilter {
         return true;
       }
 
-      // Plugins rule
+      // Sync selected plugin folders without enabling all community plugins.
       if (!this.settings.syncPlugins && normalized.includes("/plugins/")) {
-        return true;
+        const pluginPath = normalized.split("/plugins/", 2)[1];
+        const pluginId = pluginPath?.split("/", 1)[0];
+        const selected = (this.settings.syncPluginIds || "")
+          .split(/[,\n]/)
+          .map((id) => id.trim())
+          .filter((id) => /^[a-z0-9][a-z0-9-]*$/.test(id));
+        if (!pluginId || !selected.includes(pluginId)) return true;
       }
 
       // Themes rule

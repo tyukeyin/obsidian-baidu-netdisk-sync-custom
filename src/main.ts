@@ -7,6 +7,10 @@ import { ManifestManager } from "./sync/manifest";
 import { SyncEngine } from "./sync/engine";
 import { StatusBarManager } from "./ui/statusBar";
 import { SyncLogModal } from "./ui/logModal";
+import { confirmMirror } from "./ui/mirrorConfirmModal";
+import { choosePolicy } from "./ui/policyModal";
+import { ChangeScheduler } from "./sync/changeScheduler";
+import { isMirrorPolicy } from "./sync/policy";
 
 export default class BaiduSyncPlugin extends Plugin {
   settings: BaiduSyncSettings = DEFAULT_SETTINGS;
@@ -17,8 +21,8 @@ export default class BaiduSyncPlugin extends Plugin {
   statusBar!: StatusBarManager;
 
   private intervalId: number | null = null;
-  private saveDebounceTimer: number | null = null;
   private ribbonIconEl: HTMLElement | null = null;
+  private changes?: ChangeScheduler;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -46,7 +50,9 @@ export default class BaiduSyncPlugin extends Plugin {
         await this.saveData(this.settings);
       },
       this.client,
-      this.manifestMgr
+      this.manifestMgr,
+      (plans) => confirmMirror(this.app, plans),
+      (initial) => choosePolicy(this.app, initial)
     );
 
     // Setup Status Bar
@@ -61,12 +67,13 @@ export default class BaiduSyncPlugin extends Plugin {
       const res = await this.engine.startSync(false);
       if (res.success) {
         new Notice("百度网盘同步完成！");
-      } else {
+      } else if (!res.cancelled) {
         new Notice("百度网盘同步失败，请检查同步日志");
       }
     });
 
     this.engine.onStateChange((state) => {
+      if (state === "idle") this.changes?.idle();
       if (this.ribbonIconEl) {
         if (state === "syncing" || state === "diffing" || state === "preparing") {
           this.ribbonIconEl.addClass("baidu-sync-spinning");
@@ -106,10 +113,7 @@ export default class BaiduSyncPlugin extends Plugin {
       window.clearInterval(this.intervalId);
       this.intervalId = null;
     }
-    if (this.saveDebounceTimer !== null) {
-      window.clearTimeout(this.saveDebounceTimer);
-      this.saveDebounceTimer = null;
-    }
+    this.changes?.dispose();
   }
 
   async loadSettings(): Promise<void> {
@@ -137,6 +141,12 @@ export default class BaiduSyncPlugin extends Plugin {
   }
 
   private setupTriggers(): void {
+    this.changes = new ChangeScheduler(
+      () => this.settings.syncOnSave && !!this.settings.accessToken && !isMirrorPolicy(this.settings.syncPolicy),
+      () => this.engine.isSyncing(),
+      () => this.engine.startSync(true),
+      () => (this.settings.syncDebounceSeconds || 5) * 1000
+    );
     // 1. Startup trigger
     if (this.settings.syncOnStartup && this.settings.accessToken) {
       // Delay 3s to let Obsidian complete internal indexing
@@ -151,21 +161,14 @@ export default class BaiduSyncPlugin extends Plugin {
     // 3. Save / Modify debounced trigger
     const onVaultChange = (file: TAbstractFile) => {
       if (!this.settings.syncOnSave || !this.settings.accessToken) return;
-      if (this.engine.isSyncing()) return;
       if (file.path.includes("sync_manifest.json") || file.path.includes("workspace")) return;
-
-      if (this.saveDebounceTimer !== null) {
-        window.clearTimeout(this.saveDebounceTimer);
-      }
-
-      const debounceMs = (this.settings.syncDebounceSeconds || 5) * 1000;
-      this.saveDebounceTimer = window.setTimeout(async () => {
-        await this.engine.startSync(true);
-      }, debounceMs);
+      this.changes?.changed();
     };
 
     this.registerEvent(this.app.vault.on("modify", onVaultChange));
     this.registerEvent(this.app.vault.on("create", onVaultChange));
     this.registerEvent(this.app.vault.on("delete", onVaultChange));
+    this.registerEvent(this.app.vault.on("rename", onVaultChange));
   }
+
 }

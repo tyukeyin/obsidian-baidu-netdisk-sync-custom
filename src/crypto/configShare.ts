@@ -10,6 +10,7 @@ export interface SharedSyncConfig {
   remoteBasePath: string;
   syncObsidianConfig: boolean;
   syncPlugins: boolean;
+  syncPluginIds?: string;
   syncThemes: boolean;
   ignoredPatterns: string;
   concurrency: number;
@@ -65,6 +66,7 @@ export async function exportEncryptedConfig(
     remoteBasePath: settings.remoteBasePath,
     syncObsidianConfig: settings.syncObsidianConfig,
     syncPlugins: settings.syncPlugins,
+    syncPluginIds: settings.syncPluginIds,
     syncThemes: settings.syncThemes,
     ignoredPatterns: settings.ignoredPatterns,
     concurrency: settings.concurrency,

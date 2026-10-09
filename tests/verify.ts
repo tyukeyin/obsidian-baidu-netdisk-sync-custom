@@ -1,4 +1,5 @@
 import assert from "assert";
+import { testPolicies } from "./policies";
 import { md5 } from "../src/crypto/md5";
 import { SyncPlanner, LocalFileInfo, RemoteFileInfo } from "../src/sync/planner";
 import { SyncFilter } from "../src/sync/filter";
@@ -55,6 +56,19 @@ function testFilter() {
   assert.strictEqual(filter2.shouldIgnore("sub/test.secret"), true);
   assert.strictEqual(filter2.shouldIgnore("temp/file.txt"), true);
   assert.strictEqual(filter2.shouldIgnore("temp2/file.txt"), false);
+
+  const selectedPluginFilter = new SyncFilter({
+    ...DEFAULT_SETTINGS,
+    syncPlugins: false,
+    syncPluginIds: "baidu-pan-video-keys"
+  }, ".obsidian");
+  assert.strictEqual(selectedPluginFilter.shouldIgnore(".obsidian/plugins/baidu-pan-video-keys"), false);
+  assert.strictEqual(selectedPluginFilter.shouldIgnore(".obsidian/plugins/baidu-pan-video-keys/main.js"), false);
+  assert.strictEqual(selectedPluginFilter.shouldIgnore(".obsidian/plugins/baidu-course-notes-importer/main.js"), true);
+  assert.strictEqual(selectedPluginFilter.shouldIgnore(".obsidian/plugins/baidu-netdisk-sync/main.js"), true);
+  const defaultPluginFilter = new SyncFilter({ ...DEFAULT_SETTINGS, syncPlugins: false }, ".obsidian");
+  assert.strictEqual(defaultPluginFilter.shouldIgnore(".obsidian/plugins/baidu-pan-video-keys/main.js"), false);
+  assert.strictEqual(defaultPluginFilter.shouldIgnore(".obsidian/plugins/other-plugin/main.js"), true);
 
   console.log("   SyncFilter tests passed!");
 }
@@ -327,6 +341,7 @@ async function runAll() {
   testMD5();
   testFilter();
   testPlannerLWW();
+  testPolicies();
   await testConfigShare();
   await testE2EEFallback();
   console.log("🎉 All unit tests passed successfully!");

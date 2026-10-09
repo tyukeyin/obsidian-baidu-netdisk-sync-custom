@@ -194,6 +194,7 @@ export class ImportConfigModal extends Modal {
               if (config.remoteBasePath) this.plugin.settings.remoteBasePath = config.remoteBasePath;
               if (config.syncObsidianConfig !== undefined) this.plugin.settings.syncObsidianConfig = config.syncObsidianConfig;
               if (config.syncPlugins !== undefined) this.plugin.settings.syncPlugins = config.syncPlugins;
+              if (config.syncPluginIds !== undefined) this.plugin.settings.syncPluginIds = config.syncPluginIds;
               if (config.syncThemes !== undefined) this.plugin.settings.syncThemes = config.syncThemes;
               if (config.ignoredPatterns !== undefined) this.plugin.settings.ignoredPatterns = config.ignoredPatterns;
               if (typeof config.concurrency === "number") this.plugin.settings.concurrency = config.concurrency;

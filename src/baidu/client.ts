@@ -6,18 +6,51 @@ import {
   BaiduFileItem,
   BaiduFileMeta,
   BaiduFileMetasResponse,
-  BaiduListResponse,
   BaiduPrecreateResponse,
   BaiduFileManagerResponse
 } from "./types";
 
+export interface ListingProgress {
+  directoriesScanned: number;
+  directoriesQueued: number;
+  directoriesSkipped: number;
+  filesFound: number;
+  requests: number;
+  retries: number;
+  elapsedMs: number;
+  concurrency: number;
+}
+export interface ListingOptions {
+  concurrency?: number;
+  shouldSkipDirectory?: (relativePath: string) => boolean;
+  onProgress?: (progress: ListingProgress) => void;
+}
 export class BaiduClient {
+  private tokenRefresh?: Promise<string>;
+  private async refreshRequestToken(param: RequestUrlParam): Promise<RequestUrlParam> {
+    const url = new URL(param.url);
+    const failedToken = url.searchParams.get('access_token');
+    if (!this.tokenRefresh) {
+      this.tokenRefresh = (async () => {
+        const current = await this.oauth.refreshTokenIfNeeded();
+        return current !== failedToken ? current : await this.oauth.refreshTokenIfNeeded(true);
+      })();
+    }
+    const pending = this.tokenRefresh;
+    try {
+      url.searchParams.set('access_token', await pending);
+      return { ...param, url: url.toString() };
+    } finally {
+      if (this.tokenRefresh === pending) this.tokenRefresh = undefined;
+    }
+  }
   constructor(private oauth: BaiduOAuthManager) {}
 
   private async requestWithRetry(
     param: RequestUrlParam,
     maxRetries = 3,
-    initialDelayMs = 1000
+    initialDelayMs = 1000,
+    onRetry?: (error: unknown) => void
   ): Promise<RequestUrlResponse> {
     let lastError: unknown = null;
     let delay = initialDelayMs;
@@ -37,7 +70,7 @@ export class BaiduClient {
               if (data.errno === -6) {
                 // Token expired, force refresh and retry
                 console.warn("[BaiduSync] Token 失效，尝试刷新并重试...");
-                await this.oauth.refreshTokenIfNeeded(true);
+                param = await this.refreshRequestToken(param);
                 throw new Error("Token expired (errno: -6)");
               }
             }
@@ -59,7 +92,8 @@ export class BaiduClient {
       } catch (err: unknown) {
         lastError = err;
         if (attempt < maxRetries) {
-          // Exponential backoff with jitter
+          // Exponential backoff with jitter; count only retries that will run.
+          onRetry?.(err);
           const jitter = Math.random() * 300;
           await new Promise((r) => window.setTimeout(r, delay + jitter));
           delay *= 2;
@@ -70,63 +104,95 @@ export class BaiduClient {
     throw (lastError instanceof Error ? lastError : new Error(String(lastError)));
   }
 
-  async listAll(rootPath: string): Promise<BaiduFileItem[]> {
-    const token = await this.oauth.refreshTokenIfNeeded();
-    const cleanPath = rootPath.endsWith("/") ? rootPath.slice(0, -1) : rootPath;
+  async listAll(rootPath: string, allowMissingRoot = false, options: ListingOptions = {}): Promise<BaiduFileItem[]> {
+    await this.oauth.refreshTokenIfNeeded();
+    const cleanPath = rootPath.endsWith('/') ? rootPath.slice(0, -1) : rootPath;
+    if (!cleanPath.startsWith('/') || cleanPath.split('/').slice(1).some(p => !p || p === '.' || p === '..') || cleanPath.includes('\\')) {
+      throw new Error('云端同步目录无效，停止同步');
+    }
+    const requested = options.concurrency ?? 2;
+    let concurrency = Number.isFinite(requested) ? Math.max(1, Math.min(3, Math.floor(requested))) : 2;
+    const started = Date.now();
     const allFiles: BaiduFileItem[] = [];
-    const dirQueue: string[] = [cleanPath];
-
-    while (dirQueue.length > 0) {
-      const currentDir = dirQueue.shift()!;
+    const dirQueue = [cleanPath];
+    const seenPaths = new Set<string>();
+    const progress: ListingProgress = {
+      directoriesScanned: 0, directoriesQueued: 1, directoriesSkipped: 0,
+      filesFound: 0, requests: 0, retries: 0, elapsedMs: 0, concurrency
+    };
+    const report = () => options.onProgress?.({ ...progress, elapsedMs: Date.now() - started, concurrency });
+    let failed = false;
+    const scanDirectory = async (currentDir: string) => {
       let start = 0;
       const limit = 1000;
-      let hasMore = true;
-
-      while (hasMore) {
-        const url = `https://pan.baidu.com/rest/2.0/xpan/file?method=list&dir=${encodeURIComponent(
-          currentDir
-        )}&order=name&desc=0&start=${start}&limit=${limit}&web=web&folder=0&access_token=${token}`;
-
-        const resp = await this.requestWithRetry({
-          url,
-          method: "GET"
+      while (!failed) {
+        // Reuse a refreshed token on later directories/pages, not the initial stale one.
+        const token = await (this.tokenRefresh ?? this.oauth.refreshTokenIfNeeded());
+        if (failed) return;
+        const url = 'https://pan.baidu.com/rest/2.0/xpan/file?method=list&dir=' + encodeURIComponent(currentDir) +
+          '&order=name&desc=0&start=' + start + '&limit=' + limit + '&web=web&folder=0&access_token=' + encodeURIComponent(token);
+        progress.requests++;
+        report();
+        const resp = await this.requestWithRetry({ url, method: 'GET' }, 3, 1000, error => {
+          progress.requests++; progress.retries++;
+          if (error instanceof Error && /31034|429|Rate Limit/.test(error.message)) concurrency = 1;
+          report();
         });
-
-        if (resp.status !== 200) {
-          throw new Error(`获取网盘文件列表失败: HTTP ${resp.status}`);
+        if (failed) return;
+        if (resp.status !== 200) throw new Error('获取网盘文件列表失败: HTTP ' + resp.status);
+        const raw: unknown = resp.json;
+        if (!raw || typeof raw !== 'object' || !('errno' in raw) || typeof raw.errno !== 'number') {
+          throw new Error('云端返回不完整文件列表，停止同步');
         }
-
-        const data = resp.json as unknown as BaiduListResponse;
-        // errno -9: path does not exist; errno 31066: directory not found; errno 20020: empty/uninitialized path
-        if (data.errno === -9 || data.errno === 31066 || data.errno === 20020) {
-          hasMore = false;
+        if (raw.errno === -9 || raw.errno === 31066 || raw.errno === 20020) {
+          if (!allowMissingRoot || currentDir !== cleanPath || start !== 0) {
+            throw new Error('云端目录缺失或扫描中发生变化，本轮停止，不能据此推断删除');
+          }
           break;
         }
-
-        if (data.errno !== 0 && data.errno !== undefined) {
-          throw new Error(`获取网盘列表返回异常 (errno: ${data.errno})`);
+        if (raw.errno !== 0) throw new Error('获取网盘列表返回异常 (errno: ' + raw.errno + ')');
+        if (!('list' in raw) || !Array.isArray(raw.list) || raw.list.length > limit) {
+          throw new Error('云端返回不完整文件列表，停止同步');
         }
-
-        if (data.list && Array.isArray(data.list)) {
-          for (const item of data.list) {
-            if (item.isdir === 1) {
-              dirQueue.push(item.path);
-            } else {
-              allFiles.push(item);
-            }
+        for (const value of raw.list as unknown[]) {
+          if (!value || typeof value !== 'object' || !('path' in value) || typeof value.path !== 'string' ||
+              !('isdir' in value) || (value.isdir !== 0 && value.isdir !== 1)) {
+            throw new Error('云端文件条目无效，停止同步');
           }
-          if (data.list.length < limit) {
-            hasMore = false;
-          } else {
-            start += limit;
+          const path = value.path;
+          const child = path.startsWith(currentDir + '/') ? path.slice(currentDir.length + 1) : '';
+          if (!child || child.includes('/') || child.includes('\\') || child === '.' || child === '..' || child.includes('\0')) {
+            throw new Error('云端返回目录外或无效路径，停止同步');
           }
-        } else {
-          hasMore = false;
+          if (seenPaths.has(path)) throw new Error('云端分页返回重复路径，停止同步以免使用不完整清单');
+          seenPaths.add(path);
+          if (value.isdir === 1) {
+            if (options.shouldSkipDirectory?.(path.slice(cleanPath.length + 1))) progress.directoriesSkipped++;
+            else { dirQueue.push(path); progress.directoriesQueued++; }
+          } else { allFiles.push(value as BaiduFileItem); progress.filesFound++; }
         }
+        report();
+        const more: unknown = 'has_more' in raw ? raw.has_more : undefined;
+        if (more !== undefined && more !== 0 && more !== 1) throw new Error('云端分页标识无效，停止同步');
+        const hasMore = more === undefined ? raw.list.length === limit : more === 1;
+        if (!hasMore) break;
+        if (raw.list.length === 0) throw new Error('云端分页没有前进，停止同步');
+        start += raw.list.length;
       }
+      if (!failed) { progress.directoriesScanned++; report(); }
+    };
+    // Drain in-flight requests on failure; never publish a partial listing.
+    // Pages in each directory remain serial to preserve pagination correctness.
+    while (dirQueue.length && !failed) {
+      const batch = dirQueue.splice(0, concurrency);
+      const settled = await Promise.allSettled(batch.map(async dir => {
+        try { await scanDirectory(dir); } catch (error) { failed = true; throw error; }
+      }));
+      const rejected = settled.find((r): r is PromiseRejectedResult => r.status === 'rejected');
+      if (rejected) { report(); throw rejected.reason; }
     }
-
-    return allFiles;
+    report();
+    return allFiles.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
   }
 
   async getFileMeta(fsId: string | number): Promise<BaiduFileMeta> {

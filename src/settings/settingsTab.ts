@@ -2,6 +2,7 @@ import { App, PluginSettingTab, Setting, Notice, SettingDefinitionItem } from "o
 import type BaiduSyncPlugin from "../main";
 import { ExportConfigModal, ImportConfigModal } from "../ui/configShareModal";
 import { DecryptMigrationModal } from "../ui/decryptMigrationModal";
+import { SYNC_POLICIES, isSyncPolicy } from "../sync/policy";
 
 export class BaiduSyncSettingTab extends PluginSettingTab {
   plugin: BaiduSyncPlugin;
@@ -179,6 +180,23 @@ export class BaiduSyncSettingTab extends PluginSettingTab {
           })
       );
 
+    new Setting(containerEl)
+      .setName("同步方向（仅此设备）")
+      .setDesc("普通单向保留目标端独有内容和独立修改，不传播删除；无历史的同名文件会跳过。覆盖/还原可能删除目标端文件，仅手动同步并预览确认。双向沿用原有规则。")
+      .addDropdown(dropdown => dropdown
+        .addOptions(SYNC_POLICIES)
+        .setValue(this.plugin.settings.syncPolicy)
+        .onChange(async value => {
+          if (this.plugin.engine.isSyncing()) {
+            dropdown.setValue(this.plugin.settings.syncPolicy);
+            new Notice("请等待本轮同步结束再更改方向");
+            return;
+          }
+          if (!isSyncPolicy(value)) return;
+          this.plugin.settings.syncPolicy = value;
+          await this.plugin.saveSettings();
+        }));
+
     // Section 4: Scope and Filtering
     new Setting(containerEl).setName("4. 配置同步与文件过滤").setHeading();
 
@@ -203,6 +221,19 @@ export class BaiduSyncSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.syncPlugins)
           .onChange(async (val) => {
             this.plugin.settings.syncPlugins = val;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("仅同步指定插件")
+      .setDesc("关闭“同步第三方插件”时生效。填写插件文件夹 ID，多个用逗号分隔；例如 baidu-pan-video-keys。")
+      .addText((input) =>
+        input
+          .setPlaceholder("baidu-pan-video-keys")
+          .setValue(this.plugin.settings.syncPluginIds || "")
+          .onChange(async (value) => {
+            this.plugin.settings.syncPluginIds = value;
             await this.plugin.saveSettings();
           })
       );
@@ -290,6 +321,16 @@ export class BaiduSyncSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           })
       );
+
+    new Setting(containerEl)
+      .setName('目录检索并发数 (1~3)')
+      .setDesc('仅影响云端文件列表检索，默认 2；触发限流时本轮检索自动降为 1。检索慢可试 3，频繁重试则设 1。')
+      .addSlider(slider => slider.setLimits(1, 3, 1)
+        .setValue(this.plugin.settings.listingConcurrency ?? 2)
+        .onChange(async value => {
+          this.plugin.settings.listingConcurrency = value;
+          await this.plugin.saveSettings();
+        }));
 
     // Section 7: End-to-End Encryption
     new Setting(containerEl).setName("7. 端到端隐私加密 (E2EE)").setHeading();

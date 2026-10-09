@@ -1,4 +1,5 @@
 import { ManifestItem } from "./manifest";
+import { SyncPolicy, isSyncPolicy, isMirrorPolicy } from "./policy";
 
 export type SyncActionType =
   | "UPLOAD"
@@ -9,6 +10,7 @@ export type SyncActionType =
   | "SKIP";
 
 export interface LocalFileInfo {
+  contentHash?: string;
   path: string;
   mtime: number;
   size: number;
@@ -33,13 +35,23 @@ export interface SyncPlanItem {
   manifest?: ManifestItem;
 }
 
+function localChangedSince(local: LocalFileInfo, manifest: ManifestItem): boolean {
+  if (local.contentHash && manifest.contentHash) return local.contentHash !== manifest.contentHash;
+  return Math.abs(local.mtime - manifest.mtime) > 1000 || local.size !== manifest.size;
+}
+function remoteChangedSince(remote: RemoteFileInfo, manifest: ManifestItem): boolean {
+  if (remote.md5 && manifest.md5) return remote.md5.toLowerCase() !== manifest.md5.toLowerCase();
+  return Math.abs(remote.mtime - manifest.remoteMtime) > 1000 || remote.size !== (manifest.remoteSize ?? manifest.size);
+}
 export class SyncPlanner {
   static plan(
     localFiles: Map<string, LocalFileInfo>,
     remoteFiles: Map<string, RemoteFileInfo>,
     manifestFiles: Record<string, ManifestItem>,
-    remoteBasePath: string
+    remoteBasePath: string,
+    policy: SyncPolicy = "bidirectional"
   ): SyncPlanItem[] {
+    if (!isSyncPolicy(policy)) throw new Error("未知同步策略，请在设置中重新选择。");
     const plans: SyncPlanItem[] = [];
     const allPaths = new Set<string>([
       ...localFiles.keys(),
@@ -56,6 +68,34 @@ export class SyncPlanner {
       const remote = remoteFiles.get(path);
       const manifest = manifestFiles[path];
       const remotePath = remote?.remotePath || `${normalizeRemoteBase}/${path}`;
+
+      if (policy !== "bidirectional") {
+        const send = policy === "send" || policy === "mirrorSend";
+        const mirror = isMirrorPolicy(policy);
+        const source = send ? local : remote;
+        const target = send ? remote : local;
+        const localChanged = !manifest || !local || localChangedSince(local, manifest);
+        const remoteChanged = !manifest || !remote || remoteChangedSince(remote, manifest);
+        const sourceChanged = send ? localChanged : remoteChanged;
+        const targetChanged = send ? remoteChanged : localChanged;
+        const item = { path, remotePath, local, remote, manifest };
+        if (!source && !target) {
+          if (manifest) plans.push({ ...item, action: "CLEAN_MANIFEST", reason: "两端均不存在，清理基线" });
+        } else if (!source) {
+          if (mirror) plans.push({ ...item, action: send ? "DELETE_REMOTE" : "DELETE_LOCAL", reason: "镜像：删除目标端独有文件" });
+        } else if (!target) {
+          // A missing target with history is an independent deletion. Preserve it in ordinary one-way mode.
+          if (mirror || !manifest) plans.push({ ...item, action: send ? "UPLOAD" : "DOWNLOAD", reason: "来源端文件传送到目标端" });
+          else plans.push({ ...item, action: "SKIP", reason: "保留目标端删除，未恢复文件" });
+        } else if (mirror && (sourceChanged || targetChanged)) {
+          plans.push({ ...item, action: send ? "UPLOAD" : "DOWNLOAD", reason: "镜像：以来源端版本覆盖目标端" });
+        } else if (!mirror && targetChanged) {
+          plans.push({ ...item, action: "SKIP", reason: manifest ? "保留目标端独立修改，未覆盖" : "无同步历史的同名文件，保留目标端，请核对后使用覆盖或还原模式" });
+        } else if (sourceChanged) {
+          plans.push({ ...item, action: send ? "UPLOAD" : "DOWNLOAD", reason: "来源端更新，目标端未独立修改" });
+        }
+        continue;
+      }
 
       // Case 1: Both sides exist
       if (local && remote) {
@@ -85,12 +125,11 @@ export class SyncPlanner {
 
         // With manifest
         const localChanged =
-          Math.abs(local.mtime - manifest.mtime) > 1000 || local.size !== manifest.size;
+          localChangedSince(local, manifest);
         const expectedRemoteSize =
           manifest.remoteSize !== undefined ? manifest.remoteSize : manifest.size;
         const remoteChanged =
-          Math.abs(remote.mtime - manifest.remoteMtime) > 1000 ||
-          remote.size !== expectedRemoteSize;
+          remoteChangedSince(remote, manifest);
 
         if (!localChanged && !remoteChanged) {
           // Both unchanged
@@ -155,7 +194,7 @@ export class SyncPlanner {
         } else {
           // Remote was deleted
           const localChanged =
-            Math.abs(local.mtime - manifest.mtime) > 1000 || local.size !== manifest.size;
+            localChangedSince(local, manifest);
           if (localChanged) {
             // Local was modified after remote deletion, keep local
             plans.push({
@@ -196,8 +235,7 @@ export class SyncPlanner {
           const expectedRemoteSize =
             manifest.remoteSize !== undefined ? manifest.remoteSize : manifest.size;
           const remoteChanged =
-            Math.abs(remote.mtime - manifest.remoteMtime) > 1000 ||
-            remote.size !== expectedRemoteSize;
+            remoteChangedSince(remote, manifest);
           if (remoteChanged) {
             // Remote was modified after local deletion, keep remote
             plans.push({

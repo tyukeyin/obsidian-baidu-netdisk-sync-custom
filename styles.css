@@ -99,3 +99,5 @@
     border-radius: 4px;
 }
 
+
+.baidu-sync-plan-preview { max-height: 45vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }

@@ -1,6 +1,7 @@
 import { DataAdapter } from "obsidian";
 
 export interface ManifestItem {
+  contentHash?: string; // Local plaintext hash, separate from encrypted remote MD5.
   path: string;           // Local relative path, e.g. "Folder/Note.md"
   remotePath: string;     // Remote absolute path, e.g. "/apps/obsidian_vault/Folder/Note.md"
   mtime: number;          // Local last modified time in milliseconds
@@ -39,12 +40,7 @@ export class ManifestManager {
         }
       }
     } catch (err) {
-      console.warn("[BaiduSync] 加载 sync_manifest 失败，将使用空清单:", err);
-      this.manifest = {
-        version: 1,
-        lastSyncTime: 0,
-        files: {}
-      };
+      throw new Error("无法读取同步历史，已停止同步，请保留 sync_manifest.json 并检查文件。");
     }
     return this.manifest;
   }
@@ -64,7 +60,7 @@ export class ManifestManager {
         JSON.stringify(this.manifest, null, 2)
       );
     } catch (err) {
-      console.error("[BaiduSync] 保存 sync_manifest 失败:", err);
+      throw new Error("无法保存同步历史，已停止后续清理操作。");
     }
   }
 

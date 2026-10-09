@@ -27,10 +27,11 @@ __export(main_exports, {
   default: () => BaiduSyncPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian8 = require("obsidian");
+var import_obsidian10 = require("obsidian");
 
 // src/settings/settings.ts
 var DEFAULT_SETTINGS = {
+  syncPolicy: "bidirectional",
   appKey: "",
   appSecret: "",
   accessToken: "",
@@ -43,6 +44,7 @@ var DEFAULT_SETTINGS = {
   syncDebounceSeconds: 5,
   syncObsidianConfig: true,
   syncPlugins: true,
+  syncPluginIds: "baidu-pan-video-keys",
   syncThemes: true,
   ignoredPatterns: [
     "**/.git/**",
@@ -53,6 +55,7 @@ var DEFAULT_SETTINGS = {
     "**/indexeddb/**"
   ].join("\n"),
   concurrency: 3,
+  listingConcurrency: 2,
   enableE2EE: false,
   e2eePassword: "",
   lastSyncTime: 0
@@ -214,6 +217,7 @@ async function exportEncryptedConfig(settings, pin) {
     remoteBasePath: settings.remoteBasePath,
     syncObsidianConfig: settings.syncObsidianConfig,
     syncPlugins: settings.syncPlugins,
+    syncPluginIds: settings.syncPluginIds,
     syncThemes: settings.syncThemes,
     ignoredPatterns: settings.ignoredPatterns,
     concurrency: settings.concurrency,
@@ -407,6 +411,7 @@ var ImportConfigModal = class extends import_obsidian.Modal {
           if (config.remoteBasePath) this.plugin.settings.remoteBasePath = config.remoteBasePath;
           if (config.syncObsidianConfig !== void 0) this.plugin.settings.syncObsidianConfig = config.syncObsidianConfig;
           if (config.syncPlugins !== void 0) this.plugin.settings.syncPlugins = config.syncPlugins;
+          if (config.syncPluginIds !== void 0) this.plugin.settings.syncPluginIds = config.syncPluginIds;
           if (config.syncThemes !== void 0) this.plugin.settings.syncThemes = config.syncThemes;
           if (config.ignoredPatterns !== void 0) this.plugin.settings.ignoredPatterns = config.ignoredPatterns;
           if (typeof config.concurrency === "number") this.plugin.settings.concurrency = config.concurrency;
@@ -533,6 +538,30 @@ var DecryptMigrationModal = class extends import_obsidian2.Modal {
   }
 };
 
+// src/sync/policy.ts
+var SYNC_POLICIES = {
+  bidirectional: "\u53CC\u5411\u540C\u6B65",
+  send: "\u4EC5\u53D1\u9001",
+  mirrorSend: "\u4EC5\u53D1\u9001\uFF1A\u8986\u76D6\u4E91\u7AEF\u53D8\u66F4",
+  receive: "\u4EC5\u63A5\u6536",
+  mirrorReceive: "\u4EC5\u63A5\u6536\uFF1A\u8FD8\u539F\u672C\u5730\u53D8\u66F4"
+};
+function isSyncPolicy(value) {
+  return typeof value === "string" && Object.prototype.hasOwnProperty.call(SYNC_POLICIES, value);
+}
+function isMirrorPolicy(policy) {
+  return policy === "mirrorSend" || policy === "mirrorReceive";
+}
+function allowsAction(policy, action) {
+  if (!isSyncPolicy(policy)) return false;
+  if (action === "SKIP" || action === "CLEAN_MANIFEST") return true;
+  if (policy === "bidirectional") return true;
+  if (policy === "send") return action === "UPLOAD";
+  if (policy === "receive") return action === "DOWNLOAD";
+  if (policy === "mirrorSend") return action === "UPLOAD" || action === "DELETE_REMOTE";
+  return action === "DOWNLOAD" || action === "DELETE_LOCAL";
+}
+
 // src/settings/settingsTab.ts
 var BaiduSyncSettingTab = class extends import_obsidian3.PluginSettingTab {
   constructor(app, plugin) {
@@ -646,6 +675,16 @@ var BaiduSyncSettingTab = class extends import_obsidian3.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
+    new import_obsidian3.Setting(containerEl).setName("\u540C\u6B65\u65B9\u5411\uFF08\u4EC5\u6B64\u8BBE\u5907\uFF09").setDesc("\u666E\u901A\u5355\u5411\u4FDD\u7559\u76EE\u6807\u7AEF\u72EC\u6709\u5185\u5BB9\u548C\u72EC\u7ACB\u4FEE\u6539\uFF0C\u4E0D\u4F20\u64AD\u5220\u9664\uFF1B\u65E0\u5386\u53F2\u7684\u540C\u540D\u6587\u4EF6\u4F1A\u8DF3\u8FC7\u3002\u8986\u76D6/\u8FD8\u539F\u53EF\u80FD\u5220\u9664\u76EE\u6807\u7AEF\u6587\u4EF6\uFF0C\u4EC5\u624B\u52A8\u540C\u6B65\u5E76\u9884\u89C8\u786E\u8BA4\u3002\u53CC\u5411\u6CBF\u7528\u539F\u6709\u89C4\u5219\u3002").addDropdown((dropdown) => dropdown.addOptions(SYNC_POLICIES).setValue(this.plugin.settings.syncPolicy).onChange(async (value) => {
+      if (this.plugin.engine.isSyncing()) {
+        dropdown.setValue(this.plugin.settings.syncPolicy);
+        new import_obsidian3.Notice("\u8BF7\u7B49\u5F85\u672C\u8F6E\u540C\u6B65\u7ED3\u675F\u518D\u66F4\u6539\u65B9\u5411");
+        return;
+      }
+      if (!isSyncPolicy(value)) return;
+      this.plugin.settings.syncPolicy = value;
+      await this.plugin.saveSettings();
+    }));
     new import_obsidian3.Setting(containerEl).setName("4. \u914D\u7F6E\u540C\u6B65\u4E0E\u6587\u4EF6\u8FC7\u6EE4").setHeading();
     const configDirName = this.app.vault.configDir;
     new import_obsidian3.Setting(containerEl).setName(`\u540C\u6B65 ${configDirName} \u914D\u7F6E\u76EE\u5F55`).setDesc(`\u5F00\u542F\u540E\u5C06\u540C\u6B65 ${configDirName} \u4E2D\u7684\u63D2\u4EF6\u3001\u5916\u89C2\u4E0E\u5168\u5C40\u914D\u7F6E\uFF08\u81EA\u52A8\u6392\u9664 workspace.json \u5E03\u5C40\u7F13\u5B58\uFF09`).addToggle(
@@ -657,6 +696,12 @@ var BaiduSyncSettingTab = class extends import_obsidian3.PluginSettingTab {
     new import_obsidian3.Setting(containerEl).setName(`\u540C\u6B65\u7B2C\u4E09\u65B9\u63D2\u4EF6 (${configDirName}/plugins)`).setDesc("\u5F00\u542F\u540E\u5C06\u5728\u591A\u7AEF\u540C\u6B65\u5DF2\u5B89\u88C5\u7684\u793E\u533A\u63D2\u4EF6").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.syncPlugins).onChange(async (val) => {
         this.plugin.settings.syncPlugins = val;
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian3.Setting(containerEl).setName("\u4EC5\u540C\u6B65\u6307\u5B9A\u63D2\u4EF6").setDesc("\u5173\u95ED\u201C\u540C\u6B65\u7B2C\u4E09\u65B9\u63D2\u4EF6\u201D\u65F6\u751F\u6548\u3002\u586B\u5199\u63D2\u4EF6\u6587\u4EF6\u5939 ID\uFF0C\u591A\u4E2A\u7528\u9017\u53F7\u5206\u9694\uFF1B\u4F8B\u5982 baidu-pan-video-keys\u3002").addText(
+      (input) => input.setPlaceholder("baidu-pan-video-keys").setValue(this.plugin.settings.syncPluginIds || "").onChange(async (value) => {
+        this.plugin.settings.syncPluginIds = value;
         await this.plugin.saveSettings();
       })
     );
@@ -702,6 +747,10 @@ var BaiduSyncSettingTab = class extends import_obsidian3.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
+    new import_obsidian3.Setting(containerEl).setName("\u76EE\u5F55\u68C0\u7D22\u5E76\u53D1\u6570 (1~3)").setDesc("\u4EC5\u5F71\u54CD\u4E91\u7AEF\u6587\u4EF6\u5217\u8868\u68C0\u7D22\uFF0C\u9ED8\u8BA4 2\uFF1B\u89E6\u53D1\u9650\u6D41\u65F6\u672C\u8F6E\u68C0\u7D22\u81EA\u52A8\u964D\u4E3A 1\u3002\u68C0\u7D22\u6162\u53EF\u8BD5 3\uFF0C\u9891\u7E41\u91CD\u8BD5\u5219\u8BBE 1\u3002").addSlider((slider) => slider.setLimits(1, 3, 1).setValue(this.plugin.settings.listingConcurrency ?? 2).onChange(async (value) => {
+      this.plugin.settings.listingConcurrency = value;
+      await this.plugin.saveSettings();
+    }));
     new import_obsidian3.Setting(containerEl).setName("7. \u7AEF\u5230\u7AEF\u9690\u79C1\u52A0\u5BC6 (E2EE)").setHeading();
     new import_obsidian3.Setting(containerEl).setName("\u5F00\u542F AES-256-GCM \u7AEF\u5230\u7AEF\u52A0\u5BC6").setDesc("\u5F00\u542F\u540E\u6240\u6709\u6587\u4EF6\u5728\u4E0A\u4F20\u5230\u767E\u5EA6\u7F51\u76D8\u524D\u5747\u4F1A\u8FDB\u884C\u9AD8\u5F3A\u5EA6\u52A0\u5BC6\uFF0C\u7F51\u76D8\u7AEF\u65E0\u6CD5\u67E5\u770B\u660E\u6587\u3002\u6CE8\u610F\uFF1A\u591A\u7AEF\u540C\u6B65\u5FC5\u987B\u914D\u7F6E\u5B8C\u5168\u76F8\u540C\u7684\u5BC6\u7801\uFF01").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.enableE2EE).onChange(async (val) => {
@@ -874,7 +923,24 @@ var BaiduClient = class {
   constructor(oauth) {
     this.oauth = oauth;
   }
-  async requestWithRetry(param, maxRetries = 3, initialDelayMs = 1e3) {
+  async refreshRequestToken(param) {
+    const url = new URL(param.url);
+    const failedToken = url.searchParams.get("access_token");
+    if (!this.tokenRefresh) {
+      this.tokenRefresh = (async () => {
+        const current = await this.oauth.refreshTokenIfNeeded();
+        return current !== failedToken ? current : await this.oauth.refreshTokenIfNeeded(true);
+      })();
+    }
+    const pending = this.tokenRefresh;
+    try {
+      url.searchParams.set("access_token", await pending);
+      return { ...param, url: url.toString() };
+    } finally {
+      if (this.tokenRefresh === pending) this.tokenRefresh = void 0;
+    }
+  }
+  async requestWithRetry(param, maxRetries = 3, initialDelayMs = 1e3, onRetry) {
     let lastError = null;
     let delay = initialDelayMs;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -889,7 +955,7 @@ var BaiduClient = class {
               }
               if (data.errno === -6) {
                 console.warn("[BaiduSync] Token \u5931\u6548\uFF0C\u5C1D\u8BD5\u5237\u65B0\u5E76\u91CD\u8BD5...");
-                await this.oauth.refreshTokenIfNeeded(true);
+                param = await this.refreshRequestToken(param);
                 throw new Error("Token expired (errno: -6)");
               }
             }
@@ -907,6 +973,7 @@ var BaiduClient = class {
       } catch (err) {
         lastError = err;
         if (attempt < maxRetries) {
+          onRetry?.(err);
           const jitter = Math.random() * 300;
           await new Promise((r) => window.setTimeout(r, delay + jitter));
           delay *= 2;
@@ -915,54 +982,114 @@ var BaiduClient = class {
     }
     throw lastError instanceof Error ? lastError : new Error(String(lastError));
   }
-  async listAll(rootPath) {
-    const token = await this.oauth.refreshTokenIfNeeded();
+  async listAll(rootPath, allowMissingRoot = false, options = {}) {
+    await this.oauth.refreshTokenIfNeeded();
     const cleanPath = rootPath.endsWith("/") ? rootPath.slice(0, -1) : rootPath;
+    if (!cleanPath.startsWith("/") || cleanPath.split("/").slice(1).some((p) => !p || p === "." || p === "..") || cleanPath.includes("\\")) {
+      throw new Error("\u4E91\u7AEF\u540C\u6B65\u76EE\u5F55\u65E0\u6548\uFF0C\u505C\u6B62\u540C\u6B65");
+    }
+    const requested = options.concurrency ?? 2;
+    let concurrency = Number.isFinite(requested) ? Math.max(1, Math.min(3, Math.floor(requested))) : 2;
+    const started = Date.now();
     const allFiles = [];
     const dirQueue = [cleanPath];
-    while (dirQueue.length > 0) {
-      const currentDir = dirQueue.shift();
+    const seenPaths = /* @__PURE__ */ new Set();
+    const progress = {
+      directoriesScanned: 0,
+      directoriesQueued: 1,
+      directoriesSkipped: 0,
+      filesFound: 0,
+      requests: 0,
+      retries: 0,
+      elapsedMs: 0,
+      concurrency
+    };
+    const report = () => options.onProgress?.({ ...progress, elapsedMs: Date.now() - started, concurrency });
+    let failed = false;
+    const scanDirectory = async (currentDir) => {
       let start = 0;
       const limit = 1e3;
-      let hasMore = true;
-      while (hasMore) {
-        const url = `https://pan.baidu.com/rest/2.0/xpan/file?method=list&dir=${encodeURIComponent(
-          currentDir
-        )}&order=name&desc=0&start=${start}&limit=${limit}&web=web&folder=0&access_token=${token}`;
-        const resp = await this.requestWithRetry({
-          url,
-          method: "GET"
+      while (!failed) {
+        const token = await (this.tokenRefresh ?? this.oauth.refreshTokenIfNeeded());
+        if (failed) return;
+        const url = "https://pan.baidu.com/rest/2.0/xpan/file?method=list&dir=" + encodeURIComponent(currentDir) + "&order=name&desc=0&start=" + start + "&limit=" + limit + "&web=web&folder=0&access_token=" + encodeURIComponent(token);
+        progress.requests++;
+        report();
+        const resp = await this.requestWithRetry({ url, method: "GET" }, 3, 1e3, (error) => {
+          progress.requests++;
+          progress.retries++;
+          if (error instanceof Error && /31034|429|Rate Limit/.test(error.message)) concurrency = 1;
+          report();
         });
-        if (resp.status !== 200) {
-          throw new Error(`\u83B7\u53D6\u7F51\u76D8\u6587\u4EF6\u5217\u8868\u5931\u8D25: HTTP ${resp.status}`);
+        if (failed) return;
+        if (resp.status !== 200) throw new Error("\u83B7\u53D6\u7F51\u76D8\u6587\u4EF6\u5217\u8868\u5931\u8D25: HTTP " + resp.status);
+        const raw = resp.json;
+        if (!raw || typeof raw !== "object" || !("errno" in raw) || typeof raw.errno !== "number") {
+          throw new Error("\u4E91\u7AEF\u8FD4\u56DE\u4E0D\u5B8C\u6574\u6587\u4EF6\u5217\u8868\uFF0C\u505C\u6B62\u540C\u6B65");
         }
-        const data = resp.json;
-        if (data.errno === -9 || data.errno === 31066 || data.errno === 20020) {
-          hasMore = false;
+        if (raw.errno === -9 || raw.errno === 31066 || raw.errno === 20020) {
+          if (!allowMissingRoot || currentDir !== cleanPath || start !== 0) {
+            throw new Error("\u4E91\u7AEF\u76EE\u5F55\u7F3A\u5931\u6216\u626B\u63CF\u4E2D\u53D1\u751F\u53D8\u5316\uFF0C\u672C\u8F6E\u505C\u6B62\uFF0C\u4E0D\u80FD\u636E\u6B64\u63A8\u65AD\u5220\u9664");
+          }
           break;
         }
-        if (data.errno !== 0 && data.errno !== void 0) {
-          throw new Error(`\u83B7\u53D6\u7F51\u76D8\u5217\u8868\u8FD4\u56DE\u5F02\u5E38 (errno: ${data.errno})`);
+        if (raw.errno !== 0) throw new Error("\u83B7\u53D6\u7F51\u76D8\u5217\u8868\u8FD4\u56DE\u5F02\u5E38 (errno: " + raw.errno + ")");
+        if (!("list" in raw) || !Array.isArray(raw.list) || raw.list.length > limit) {
+          throw new Error("\u4E91\u7AEF\u8FD4\u56DE\u4E0D\u5B8C\u6574\u6587\u4EF6\u5217\u8868\uFF0C\u505C\u6B62\u540C\u6B65");
         }
-        if (data.list && Array.isArray(data.list)) {
-          for (const item of data.list) {
-            if (item.isdir === 1) {
-              dirQueue.push(item.path);
-            } else {
-              allFiles.push(item);
+        for (const value of raw.list) {
+          if (!value || typeof value !== "object" || !("path" in value) || typeof value.path !== "string" || !("isdir" in value) || value.isdir !== 0 && value.isdir !== 1) {
+            throw new Error("\u4E91\u7AEF\u6587\u4EF6\u6761\u76EE\u65E0\u6548\uFF0C\u505C\u6B62\u540C\u6B65");
+          }
+          const path = value.path;
+          const child = path.startsWith(currentDir + "/") ? path.slice(currentDir.length + 1) : "";
+          if (!child || child.includes("/") || child.includes("\\") || child === "." || child === ".." || child.includes("\0")) {
+            throw new Error("\u4E91\u7AEF\u8FD4\u56DE\u76EE\u5F55\u5916\u6216\u65E0\u6548\u8DEF\u5F84\uFF0C\u505C\u6B62\u540C\u6B65");
+          }
+          if (seenPaths.has(path)) throw new Error("\u4E91\u7AEF\u5206\u9875\u8FD4\u56DE\u91CD\u590D\u8DEF\u5F84\uFF0C\u505C\u6B62\u540C\u6B65\u4EE5\u514D\u4F7F\u7528\u4E0D\u5B8C\u6574\u6E05\u5355");
+          seenPaths.add(path);
+          if (value.isdir === 1) {
+            if (options.shouldSkipDirectory?.(path.slice(cleanPath.length + 1))) progress.directoriesSkipped++;
+            else {
+              dirQueue.push(path);
+              progress.directoriesQueued++;
             }
-          }
-          if (data.list.length < limit) {
-            hasMore = false;
           } else {
-            start += limit;
+            allFiles.push(value);
+            progress.filesFound++;
           }
-        } else {
-          hasMore = false;
         }
+        report();
+        const more = "has_more" in raw ? raw.has_more : void 0;
+        if (more !== void 0 && more !== 0 && more !== 1) throw new Error("\u4E91\u7AEF\u5206\u9875\u6807\u8BC6\u65E0\u6548\uFF0C\u505C\u6B62\u540C\u6B65");
+        const hasMore = more === void 0 ? raw.list.length === limit : more === 1;
+        if (!hasMore) break;
+        if (raw.list.length === 0) throw new Error("\u4E91\u7AEF\u5206\u9875\u6CA1\u6709\u524D\u8FDB\uFF0C\u505C\u6B62\u540C\u6B65");
+        start += raw.list.length;
+      }
+      if (!failed) {
+        progress.directoriesScanned++;
+        report();
+      }
+    };
+    while (dirQueue.length && !failed) {
+      const batch = dirQueue.splice(0, concurrency);
+      const settled = await Promise.allSettled(batch.map(async (dir) => {
+        try {
+          await scanDirectory(dir);
+        } catch (error) {
+          failed = true;
+          throw error;
+        }
+      }));
+      const rejected = settled.find((r) => r.status === "rejected");
+      if (rejected) {
+        report();
+        throw rejected.reason;
       }
     }
-    return allFiles;
+    report();
+    return allFiles.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
   }
   async getFileMeta(fsId) {
     const token = await this.oauth.refreshTokenIfNeeded();
@@ -1139,12 +1266,7 @@ var ManifestManager = class {
         }
       }
     } catch (err) {
-      console.warn("[BaiduSync] \u52A0\u8F7D sync_manifest \u5931\u8D25\uFF0C\u5C06\u4F7F\u7528\u7A7A\u6E05\u5355:", err);
-      this.manifest = {
-        version: 1,
-        lastSyncTime: 0,
-        files: {}
-      };
+      throw new Error("\u65E0\u6CD5\u8BFB\u53D6\u540C\u6B65\u5386\u53F2\uFF0C\u5DF2\u505C\u6B62\u540C\u6B65\uFF0C\u8BF7\u4FDD\u7559 sync_manifest.json \u5E76\u68C0\u67E5\u6587\u4EF6\u3002");
     }
     return this.manifest;
   }
@@ -1162,7 +1284,7 @@ var ManifestManager = class {
         JSON.stringify(this.manifest, null, 2)
       );
     } catch (err) {
-      console.error("[BaiduSync] \u4FDD\u5B58 sync_manifest \u5931\u8D25:", err);
+      throw new Error("\u65E0\u6CD5\u4FDD\u5B58\u540C\u6B65\u5386\u53F2\uFF0C\u5DF2\u505C\u6B62\u540E\u7EED\u6E05\u7406\u64CD\u4F5C\u3002");
     }
   }
   get(path) {
@@ -1184,9 +1306,6 @@ var ManifestManager = class {
     return this.manifest.lastSyncTime;
   }
 };
-
-// src/sync/engine.ts
-var import_obsidian6 = require("obsidian");
 
 // src/crypto/md5.ts
 function safeAdd(x, y) {
@@ -1313,6 +1432,9 @@ function md5(buffer) {
   return result;
 }
 
+// src/sync/engine.ts
+var import_obsidian6 = require("obsidian");
+
 // src/baidu/uploader.ts
 var CHUNK_SIZE = 4 * 1024 * 1024;
 var BaiduUploader = class {
@@ -1406,6 +1528,7 @@ var SyncFilter = class {
     this.settings = settings;
     this.configDir = configDir;
     this.compiledPatterns = [];
+    this.subtreePatterns = [];
     this.recompilePatterns();
   }
   updateSettings(settings) {
@@ -1414,16 +1537,41 @@ var SyncFilter = class {
   }
   recompilePatterns() {
     this.compiledPatterns = [];
+    this.subtreePatterns = [];
     const lines = this.settings.ignoredPatterns.split("\n");
     for (const line of lines) {
       const trimmed = line.trim();
       if (trimmed && !trimmed.startsWith("#")) {
         try {
-          this.compiledPatterns.push(globToRegex(trimmed));
+          const pattern = globToRegex(trimmed);
+          this.compiledPatterns.push(pattern);
+          if (trimmed.endsWith("/**")) this.subtreePatterns.push(pattern);
         } catch {
         }
       }
     }
+  }
+  // Only prune a subtree when all its descendants are out of scope.
+  // File-only patterns must not hide allowed files such as PDF attachments.
+  shouldSkipDirectory(relativePath) {
+    const path = relativePath.replace(/\\/g, "/").replace(/\/+$/, "");
+    const parts = path.split("/");
+    if (path.includes("baidu-netdisk-sync") || path.includes("obsidian-baidu-netdisk-sync") || parts.includes(".git") || parts[0] === ".trash") return true;
+    const config = this.configDir.replace(/\\/g, "/").replace(/\/+$/, "");
+    if (config && (path === config || path.startsWith(config + "/"))) {
+      if (!this.settings.syncObsidianConfig) return true;
+      if ((path + "/").includes("/cache/") || (path + "/").includes("/indexeddb/")) return true;
+      const selected = (this.settings.syncPluginIds || "").split(/[,\n]/).map((id) => id.trim()).filter((id) => /^[a-z0-9][a-z0-9-]*$/.test(id));
+      if (!this.settings.syncPlugins) {
+        if (path === config + "/plugins" && selected.length === 0) return true;
+        if (path.startsWith(config + "/plugins/")) {
+          const id = path.slice((config + "/plugins/").length).split("/")[0];
+          if (!selected.includes(id)) return true;
+        }
+      }
+      if (!this.settings.syncThemes && (path === config + "/themes" || path.startsWith(config + "/themes/"))) return true;
+    }
+    return this.subtreePatterns.some((pattern) => pattern.test(path + "/"));
   }
   shouldIgnore(relativePath) {
     const normalized = relativePath.replace(/\\/g, "/");
@@ -1445,7 +1593,10 @@ var SyncFilter = class {
         return true;
       }
       if (!this.settings.syncPlugins && normalized.includes("/plugins/")) {
-        return true;
+        const pluginPath = normalized.split("/plugins/", 2)[1];
+        const pluginId = pluginPath?.split("/", 1)[0];
+        const selected = (this.settings.syncPluginIds || "").split(/[,\n]/).map((id) => id.trim()).filter((id) => /^[a-z0-9][a-z0-9-]*$/.test(id));
+        if (!pluginId || !selected.includes(pluginId)) return true;
       }
       if (!this.settings.syncThemes && normalized.includes("/themes/")) {
         return true;
@@ -1504,8 +1655,17 @@ var AsyncQueue = class {
 };
 
 // src/sync/planner.ts
+function localChangedSince(local, manifest) {
+  if (local.contentHash && manifest.contentHash) return local.contentHash !== manifest.contentHash;
+  return Math.abs(local.mtime - manifest.mtime) > 1e3 || local.size !== manifest.size;
+}
+function remoteChangedSince(remote, manifest) {
+  if (remote.md5 && manifest.md5) return remote.md5.toLowerCase() !== manifest.md5.toLowerCase();
+  return Math.abs(remote.mtime - manifest.remoteMtime) > 1e3 || remote.size !== (manifest.remoteSize ?? manifest.size);
+}
 var SyncPlanner = class {
-  static plan(localFiles, remoteFiles, manifestFiles, remoteBasePath) {
+  static plan(localFiles, remoteFiles, manifestFiles, remoteBasePath, policy = "bidirectional") {
+    if (!isSyncPolicy(policy)) throw new Error("\u672A\u77E5\u540C\u6B65\u7B56\u7565\uFF0C\u8BF7\u5728\u8BBE\u7F6E\u4E2D\u91CD\u65B0\u9009\u62E9\u3002");
     const plans = [];
     const allPaths = /* @__PURE__ */ new Set([
       ...localFiles.keys(),
@@ -1518,6 +1678,32 @@ var SyncPlanner = class {
       const remote = remoteFiles.get(path);
       const manifest = manifestFiles[path];
       const remotePath = remote?.remotePath || `${normalizeRemoteBase}/${path}`;
+      if (policy !== "bidirectional") {
+        const send = policy === "send" || policy === "mirrorSend";
+        const mirror = isMirrorPolicy(policy);
+        const source = send ? local : remote;
+        const target = send ? remote : local;
+        const localChanged = !manifest || !local || localChangedSince(local, manifest);
+        const remoteChanged = !manifest || !remote || remoteChangedSince(remote, manifest);
+        const sourceChanged = send ? localChanged : remoteChanged;
+        const targetChanged = send ? remoteChanged : localChanged;
+        const item = { path, remotePath, local, remote, manifest };
+        if (!source && !target) {
+          if (manifest) plans.push({ ...item, action: "CLEAN_MANIFEST", reason: "\u4E24\u7AEF\u5747\u4E0D\u5B58\u5728\uFF0C\u6E05\u7406\u57FA\u7EBF" });
+        } else if (!source) {
+          if (mirror) plans.push({ ...item, action: send ? "DELETE_REMOTE" : "DELETE_LOCAL", reason: "\u955C\u50CF\uFF1A\u5220\u9664\u76EE\u6807\u7AEF\u72EC\u6709\u6587\u4EF6" });
+        } else if (!target) {
+          if (mirror || !manifest) plans.push({ ...item, action: send ? "UPLOAD" : "DOWNLOAD", reason: "\u6765\u6E90\u7AEF\u6587\u4EF6\u4F20\u9001\u5230\u76EE\u6807\u7AEF" });
+          else plans.push({ ...item, action: "SKIP", reason: "\u4FDD\u7559\u76EE\u6807\u7AEF\u5220\u9664\uFF0C\u672A\u6062\u590D\u6587\u4EF6" });
+        } else if (mirror && (sourceChanged || targetChanged)) {
+          plans.push({ ...item, action: send ? "UPLOAD" : "DOWNLOAD", reason: "\u955C\u50CF\uFF1A\u4EE5\u6765\u6E90\u7AEF\u7248\u672C\u8986\u76D6\u76EE\u6807\u7AEF" });
+        } else if (!mirror && targetChanged) {
+          plans.push({ ...item, action: "SKIP", reason: manifest ? "\u4FDD\u7559\u76EE\u6807\u7AEF\u72EC\u7ACB\u4FEE\u6539\uFF0C\u672A\u8986\u76D6" : "\u65E0\u540C\u6B65\u5386\u53F2\u7684\u540C\u540D\u6587\u4EF6\uFF0C\u4FDD\u7559\u76EE\u6807\u7AEF\uFF0C\u8BF7\u6838\u5BF9\u540E\u4F7F\u7528\u8986\u76D6\u6216\u8FD8\u539F\u6A21\u5F0F" });
+        } else if (sourceChanged) {
+          plans.push({ ...item, action: send ? "UPLOAD" : "DOWNLOAD", reason: "\u6765\u6E90\u7AEF\u66F4\u65B0\uFF0C\u76EE\u6807\u7AEF\u672A\u72EC\u7ACB\u4FEE\u6539" });
+        }
+        continue;
+      }
       if (local && remote) {
         if (!manifest) {
           if (local.mtime >= remote.mtime) {
@@ -1541,9 +1727,9 @@ var SyncPlanner = class {
           }
           continue;
         }
-        const localChanged = Math.abs(local.mtime - manifest.mtime) > 1e3 || local.size !== manifest.size;
+        const localChanged = localChangedSince(local, manifest);
         const expectedRemoteSize = manifest.remoteSize !== void 0 ? manifest.remoteSize : manifest.size;
-        const remoteChanged = Math.abs(remote.mtime - manifest.remoteMtime) > 1e3 || remote.size !== expectedRemoteSize;
+        const remoteChanged = remoteChangedSince(remote, manifest);
         if (!localChanged && !remoteChanged) {
           continue;
         } else if (localChanged && !remoteChanged) {
@@ -1601,7 +1787,7 @@ var SyncPlanner = class {
             local
           });
         } else {
-          const localChanged = Math.abs(local.mtime - manifest.mtime) > 1e3 || local.size !== manifest.size;
+          const localChanged = localChangedSince(local, manifest);
           if (localChanged) {
             plans.push({
               path,
@@ -1635,7 +1821,7 @@ var SyncPlanner = class {
           });
         } else {
           const expectedRemoteSize = manifest.remoteSize !== void 0 ? manifest.remoteSize : manifest.size;
-          const remoteChanged = Math.abs(remote.mtime - manifest.remoteMtime) > 1e3 || remote.size !== expectedRemoteSize;
+          const remoteChanged = remoteChangedSince(remote, manifest);
           if (remoteChanged) {
             plans.push({
               path,
@@ -1674,12 +1860,14 @@ var SyncPlanner = class {
 
 // src/sync/engine.ts
 var SyncEngine = class {
-  constructor(app, getSettings, saveSettings, client, manifest) {
+  constructor(app, getSettings, saveSettings, client, manifest, approveMirror = async () => false, selectPolicy) {
     this.app = app;
     this.getSettings = getSettings;
     this.saveSettings = saveSettings;
     this.client = client;
     this.manifest = manifest;
+    this.approveMirror = approveMirror;
+    this.selectPolicy = selectPolicy;
     this.state = "idle";
     this.logs = [];
     this.onStateChangeListeners = [];
@@ -1735,12 +1923,12 @@ var SyncEngine = class {
       }
     }
   }
-  async startSync(silent = false) {
+  async startSync(silent = false, selectForRun = true) {
     if (this.state !== "idle" && this.state !== "error") {
       this.addLog("warn", "\u5DF2\u6709\u540C\u6B65\u4EFB\u52A1\u6B63\u5728\u8FD0\u884C\uFF0C\u8DF3\u8FC7\u672C\u6B21\u89E6\u53D1");
       return { success: false, stats: { uploaded: 0, downloaded: 0, deleted: 0, errors: 0 } };
     }
-    const settings = this.getSettings();
+    const settings = { ...this.getSettings() };
     if (!settings.accessToken) {
       this.addLog("error", "\u672A\u914D\u7F6E\u767E\u5EA6\u7F51\u76D8\u6388\u6743\uFF0C\u8BF7\u5148\u524D\u5F80\u8BBE\u7F6E\u6388\u6743\u8D26\u53F7");
       this.setState("error", "\u672A\u6388\u6743\u8D26\u53F7");
@@ -1750,32 +1938,110 @@ var SyncEngine = class {
     this.queue.setConcurrency(settings.concurrency || 3);
     const stats = { uploaded: 0, downloaded: 0, deleted: 0, errors: 0 };
     const startTime = Date.now();
+    const configuredPolicy = settings.syncPolicy;
     try {
+      if (!silent && selectForRun && this.selectPolicy) {
+        this.setState("preparing", "\u7B49\u5F85\u9009\u62E9\u540C\u6B65\u65B9\u5F0F...");
+        const initial = isSyncPolicy(settings.lastManualPolicy) ? settings.lastManualPolicy : settings.syncPolicy;
+        const selected = await this.selectPolicy(initial);
+        if (selected === null) {
+          this.setState("idle", "\u5DF2\u53D6\u6D88");
+          return { success: false, cancelled: true, stats };
+        }
+        if (!isSyncPolicy(selected)) throw new Error("\u672A\u77E5\u540C\u6B65\u7B56\u7565");
+        settings.syncPolicy = selected;
+        await this.saveSettings({ ...this.getSettings(), lastManualPolicy: selected });
+      }
+      const policy = settings.syncPolicy;
+      if (!isSyncPolicy(policy)) throw new Error("\u672A\u77E5\u540C\u6B65\u7B56\u7565\uFF0C\u8BF7\u5728\u8BBE\u7F6E\u4E2D\u91CD\u65B0\u9009\u62E9\u3002");
+      if (silent && isMirrorPolicy(policy)) {
+        this.addLog("info", "\u8986\u76D6/\u8FD8\u539F\u6A21\u5F0F\u4EC5\u652F\u6301\u624B\u52A8\u540C\u6B65\uFF0C\u5DF2\u8DF3\u8FC7\u81EA\u52A8\u89E6\u53D1");
+        return { success: false, cancelled: true, stats };
+      }
+      this.addLog("info", `\u672C\u8F6E\u540C\u6B65\u65B9\u5411\uFF1A${SYNC_POLICIES[policy]}`);
       this.setState("preparing", "\u6B63\u5728\u52A0\u8F7D\u540C\u6B65\u6E05\u5355...");
       await this.manifest.load();
       this.setState("diffing", "\u6B63\u5728\u626B\u63CF\u672C\u5730\u6587\u4EF6...");
       const localFiles = await this.scanLocalFiles();
       this.setState("diffing", "\u6B63\u5728\u68C0\u7D22\u767E\u5EA6\u7F51\u76D8\u6587\u4EF6\u5217\u8868...");
-      const remoteFiles = await this.scanRemoteFiles(settings.remoteBasePath);
+      const remoteFiles = await this.scanRemoteFiles(
+        settings.remoteBasePath,
+        Object.keys(this.manifest.getAll()).length === 0 && policy !== "receive" && policy !== "mirrorReceive"
+      );
+      if (!settings.enableE2EE) {
+        const history = this.manifest.getAll();
+        for (const [path, local] of localFiles) {
+          const remote = remoteFiles.get(path);
+          const previous = history[path];
+          if (local.contentHash && remote?.md5 && local.contentHash === remote.md5.toLowerCase()) {
+            this.manifest.set({
+              path,
+              remotePath: remote.remotePath,
+              mtime: local.mtime,
+              remoteMtime: remote.mtime,
+              size: local.size,
+              remoteSize: remote.size,
+              fsId: remote.fsId,
+              md5: remote.md5,
+              contentHash: local.contentHash
+            });
+          } else if (local.contentHash && previous?.md5 && !previous.contentHash && local.contentHash === previous.md5.toLowerCase()) {
+            this.manifest.set({ ...previous, contentHash: local.contentHash });
+          }
+        }
+      }
       this.setState("diffing", "\u6B63\u5728\u5BF9\u6BD4\u5DEE\u5F02\u5E76\u88C1\u51B3\u51B2\u7A81 (LWW)...");
       const plans = SyncPlanner.plan(
         localFiles,
         remoteFiles,
-        this.manifest.getAll(),
-        settings.remoteBasePath
+        Object.fromEntries(Object.entries(this.manifest.getAll()).filter(([path]) => !this.filter.shouldIgnore(path))),
+        settings.remoteBasePath,
+        policy
       );
+      for (const item of plans.filter((p) => p.action === "SKIP")) this.addLog("warn", `\u8DF3\u8FC7 ${item.path}\uFF1A${item.reason}`);
+      const skipped = plans.filter((p) => p.action === "SKIP").length;
+      if (skipped) this.addLog("warn", `\u6709 ${skipped} \u4E2A\u6587\u4EF6\u56E0\u76EE\u6807\u7AEF\u53D8\u66F4\u6216\u7F3A\u5C11\u5386\u53F2\u800C\u4FDD\u7559\uFF0C\u672A\u540C\u6B65\uFF1B\u4E24\u7AEF\u4E0D\u4E00\u5B9A\u4E00\u81F4\u3002`);
+      if (isMirrorPolicy(policy) && plans.length && !await this.approveMirror(plans)) {
+        this.addLog("info", "\u5DF2\u53D6\u6D88\u8986\u76D6/\u8FD8\u539F\uFF0C\u672C\u8F6E\u672A\u4F20\u8F93\u6216\u5220\u9664\u6587\u4EF6");
+        this.setState("idle", "\u5DF2\u53D6\u6D88");
+        return { success: false, cancelled: true, stats };
+      }
+      if (isMirrorPolicy(policy) && plans.length) {
+        const fingerprint = (files) => JSON.stringify([...files.entries()].sort(([a], [b]) => a.localeCompare(b)));
+        if (fingerprint(await this.scanLocalFiles()) !== fingerprint(localFiles) || fingerprint(await this.scanRemoteFiles(settings.remoteBasePath)) !== fingerprint(remoteFiles)) {
+          throw new Error("\u9884\u89C8\u540E\u6587\u4EF6\u53D1\u751F\u53D8\u5316\uFF0C\u5DF2\u505C\u6B62\u6267\u884C\uFF0C\u8BF7\u91CD\u65B0\u540C\u6B65\u5E76\u6838\u5BF9\u6E05\u5355\u3002");
+        }
+      }
       if (plans.length === 0) {
-        this.addLog("info", "\u4E24\u7AEF\u6587\u4EF6\u5DF2\u5904\u4E8E\u6700\u65B0\u4E00\u81F4\u72B6\u6001\uFF0C\u65E0\u9700\u4F20\u8F93");
+        await this.manifest.save();
+        this.addLog("info", "\u5F53\u524D\u540C\u6B65\u65B9\u5411\u4E0B\u65E0\u5F85\u6267\u884C\u64CD\u4F5C");
         this.setState("idle", "\u540C\u6B65\u5B8C\u6210 (\u65E0\u53D8\u52A8)");
         return { success: true, stats };
       }
       this.addLog("info", `\u89C4\u5212\u5B8C\u6210\uFF0C\u5F85\u6267\u884C\u64CD\u4F5C\u6570: ${plans.length}`);
       this.setState("syncing", `\u540C\u6B65\u4E2D (0/${plans.length})...`);
       let processed = 0;
-      for (const item of plans) {
+      const orderedPlans = [...plans].sort((a, b) => Number(a.action.startsWith("DELETE") || a.action === "CLEAN_MANIFEST") - Number(b.action.startsWith("DELETE") || b.action === "CLEAN_MANIFEST"));
+      let deletionChecked = false;
+      for (const item of orderedPlans) {
         await this.queue.add(async () => {
           try {
-            await this.executePlanItem(item);
+            if (item.action.startsWith("DELETE") || item.action === "CLEAN_MANIFEST") {
+              if (stats.errors) throw new Error("\u524D\u5E8F\u64CD\u4F5C\u5931\u8D25\uFF0C\u4FDD\u7559\u65E7\u8DEF\u5F84\uFF0C\u5F85\u4E0B\u6B21\u540C\u6B65\u91CD\u8BD5");
+              if (!deletionChecked) {
+                await this.manifest.save();
+                const freshRemote = await this.scanRemoteFiles(settings.remoteBasePath);
+                for (const removal of orderedPlans.filter((p) => p.action.startsWith("DELETE"))) {
+                  const fresh = freshRemote.get(removal.path);
+                  if (removal.action === "DELETE_LOCAL" && fresh) throw new Error("\u4E91\u7AEF\u8DEF\u5F84\u91CD\u65B0\u51FA\u73B0\uFF0C\u505C\u6B62\u6E05\u7406");
+                  if (removal.action === "DELETE_REMOTE" && (!fresh || fresh.mtime !== removal.remote?.mtime || fresh.size !== removal.remote?.size || fresh.md5 !== removal.remote?.md5)) throw new Error("\u4E91\u7AEF\u6587\u4EF6\u53D1\u751F\u53D8\u5316\uFF0C\u505C\u6B62\u6E05\u7406");
+                }
+                deletionChecked = true;
+              }
+            }
+            if (this.getSettings().syncPolicy !== configuredPolicy || this.getSettings().remoteBasePath !== settings.remoteBasePath) throw new Error("\u540C\u6B65\u8BBE\u7F6E\u5DF2\u6539\u53D8\uFF0C\u8BF7\u91CD\u65B0\u540C\u6B65");
+            if (!allowsAction(policy, item.action)) throw new Error("\u540C\u6B65\u65B9\u5411\u7981\u6B62\u6267\u884C\u6B64\u64CD\u4F5C");
+            await this.executePlanItem(item, settings);
             if (item.action === "UPLOAD") stats.uploaded++;
             else if (item.action === "DOWNLOAD") stats.downloaded++;
             else if (item.action === "DELETE_LOCAL" || item.action === "DELETE_REMOTE") stats.deleted++;
@@ -1792,8 +2058,7 @@ var SyncEngine = class {
       await this.queue.waitAll();
       this.manifest.updateLastSyncTime();
       await this.manifest.save();
-      settings.lastSyncTime = Date.now();
-      await this.saveSettings(settings);
+      await this.saveSettings({ ...this.getSettings(), lastSyncTime: Date.now() });
       const elapsed = ((Date.now() - startTime) / 1e3).toFixed(1);
       const summary = `\u540C\u6B65\u5B8C\u6210\uFF01\u7528\u65F6 ${elapsed}s | \u4E0A\u4F20: ${stats.uploaded}, \u4E0B\u8F7D: ${stats.downloaded}, \u5220\u9664: ${stats.deleted}, \u5931\u8D25: ${stats.errors}`;
       this.addLog(stats.errors > 0 ? "warn" : "success", summary);
@@ -1806,15 +2071,15 @@ var SyncEngine = class {
       return { success: false, stats };
     }
   }
-  async executePlanItem(item) {
-    const settings = this.getSettings();
+  async executePlanItem(item, settings) {
     const adapter = this.app.vault.adapter;
     switch (item.action) {
       case "UPLOAD": {
         if (!await adapter.exists(item.path)) {
-          return;
+          throw new Error("\u5F85\u4E0A\u4F20\u6587\u4EF6\u5DF2\u79FB\u52A8\u6216\u5220\u9664\uFF0C\u8BF7\u91CD\u65B0\u540C\u6B65");
         }
         const buffer = await adapter.readBinary(item.path);
+        if (item.local?.contentHash && md5(new Uint8Array(buffer)) !== item.local.contentHash) throw new Error("\u626B\u63CF\u540E\u672C\u5730\u5185\u5BB9\u5DF2\u53D8\u5316\uFF0C\u8BF7\u91CD\u65B0\u540C\u6B65");
         const stat = await adapter.stat(item.path);
         const localMtime = stat?.mtime || Date.now();
         const res = await this.uploader.uploadFile(item.remotePath, buffer, {
@@ -1825,6 +2090,7 @@ var SyncEngine = class {
           path: item.path,
           remotePath: item.remotePath,
           mtime: localMtime,
+          contentHash: md5(new Uint8Array(buffer)),
           remoteMtime: (res.mtime || Math.floor(Date.now() / 1e3)) * 1e3,
           md5: res.md5 || "",
           size: stat?.size || buffer.byteLength,
@@ -1841,19 +2107,22 @@ var SyncEngine = class {
         const buffer = await this.downloader.downloadByFsId(item.remote.fsId, {
           e2eePassword: settings.e2eePassword
         });
-        const lastSlash = item.path.lastIndexOf("/");
-        if (lastSlash > 0) {
-          const dir = item.path.substring(0, lastSlash);
+        const segments = item.path.split("/");
+        for (let i = 1; i < segments.length; i++) {
+          const dir = segments.slice(0, i).join("/");
           if (!await adapter.exists(dir)) {
             await adapter.mkdir(dir);
           }
         }
+        await this.assertLocalUnchanged(item);
         await adapter.writeBinary(item.path, buffer);
+        if (md5(new Uint8Array(await adapter.readBinary(item.path))) !== md5(new Uint8Array(buffer))) throw new Error("\u4E0B\u8F7D\u6587\u4EF6\u843D\u76D8\u6821\u9A8C\u5931\u8D25\uFF0C\u4FDD\u7559\u65E7\u8DEF\u5F84");
         const stat = await adapter.stat(item.path);
         this.manifest.set({
           path: item.path,
           remotePath: item.remotePath,
           mtime: stat?.mtime || Date.now(),
+          contentHash: md5(new Uint8Array(buffer)),
           remoteMtime: item.remote.mtime,
           md5: item.remote.md5 || "",
           size: buffer.byteLength,
@@ -1864,6 +2133,7 @@ var SyncEngine = class {
         break;
       }
       case "DELETE_LOCAL": {
+        await this.assertLocalUnchanged(item);
         if (await adapter.exists(item.path)) {
           const file = this.app.vault.getAbstractFileByPath(item.path);
           if (file && file instanceof import_obsidian6.TFile) {
@@ -1874,9 +2144,11 @@ var SyncEngine = class {
           this.addLog("info", `\u79FB\u5165\u672C\u5730\u56DE\u6536\u7AD9: ${item.path}`);
         }
         this.manifest.delete(item.path);
+        await this.pruneEmptyParents(item.path);
         break;
       }
       case "DELETE_REMOTE": {
+        if (await adapter.exists(item.path)) throw new Error("\u672C\u5730\u8DEF\u5F84\u5DF2\u91CD\u65B0\u51FA\u73B0\uFF0C\u505C\u6B62\u5220\u9664\u4E91\u7AEF\u6587\u4EF6");
         await this.client.deleteFiles([item.remotePath]);
         this.manifest.delete(item.path);
         this.addLog("info", `\u79FB\u5165\u7F51\u76D8\u56DE\u6536\u7AD9: ${item.path}`);
@@ -1890,16 +2162,40 @@ var SyncEngine = class {
         break;
     }
   }
+  async assertLocalUnchanged(item) {
+    const adapter = this.app.vault.adapter;
+    const exists = await adapter.exists(item.path);
+    if (!item.local && exists) throw new Error("\u672C\u5730\u51FA\u73B0\u65B0\u6587\u4EF6\uFF0C\u4FDD\u7559\u5E76\u7B49\u5F85\u91CD\u65B0\u540C\u6B65");
+    if (item.local?.contentHash && (!exists || md5(new Uint8Array(await adapter.readBinary(item.path))) !== item.local.contentHash)) {
+      throw new Error("\u672C\u5730\u5185\u5BB9\u5DF2\u53D8\u5316\uFF0C\u4FDD\u7559\u5E76\u7B49\u5F85\u91CD\u65B0\u540C\u6B65");
+    }
+  }
+  async pruneEmptyParents(path) {
+    const adapter = this.app.vault.adapter;
+    let dir = path.slice(0, path.lastIndexOf("/"));
+    if (!path.includes("/")) return;
+    while (dir && !this.filter.shouldIgnore(dir) && dir !== this.app.vault.configDir && !dir.startsWith(this.app.vault.configDir + "/")) {
+      const children = await adapter.list(dir);
+      if (children.files.length || children.folders.length) break;
+      await adapter.rmdir(dir, false);
+      this.addLog("info", `\u6E05\u7406\u65E7\u7A7A\u76EE\u5F55: ${dir}`);
+      if (!dir.includes("/")) break;
+      dir = dir.slice(0, dir.lastIndexOf("/"));
+    }
+  }
   async convertVaultToPlaintext(onProgress) {
     if (this.state !== "idle" && this.state !== "error") {
       throw new Error("\u5DF2\u6709\u540C\u6B65\u4EFB\u52A1\u6B63\u5728\u8FD0\u884C\uFF0C\u8BF7\u7B49\u5F85\u5F53\u524D\u4EFB\u52A1\u5B8C\u6210\u3002");
     }
     const settings = this.getSettings();
+    if (settings.syncPolicy !== "bidirectional") {
+      throw new Error("\u5168\u91CF\u89E3\u5BC6\u8FC1\u79FB\u4F1A\u8BFB\u5199\u4E24\u7AEF\uFF0C\u8BF7\u5148\u5207\u56DE\u53CC\u5411\u540C\u6B65\u3002");
+    }
     if (!settings.accessToken) {
       throw new Error("\u672A\u914D\u7F6E\u767E\u5EA6\u7F51\u76D8\u6388\u6743\uFF0C\u8BF7\u5148\u524D\u5F80\u8BBE\u7F6E\u6388\u6743\u8D26\u53F7\u3002");
     }
     this.addLog("info", "\u542F\u52A8\u5168\u91CF\u89E3\u5BC6\u8FC1\u79FB\u6D41\u7A0B\uFF1A\u5F00\u59CB\u62C9\u53D6\u5E76\u89E3\u5BC6\u4E91\u7AEF\u5168\u90E8\u6700\u65B0\u6587\u4EF6\u786E\u4FDD\u672C\u5730\u5B8C\u6574...");
-    const pullResult = await this.startSync(false);
+    const pullResult = await this.startSync(false, false);
     if (!pullResult.success && pullResult.stats.errors > 0) {
       throw new Error(`\u4E91\u7AEF\u9884\u62C9\u53D6\u672A\u5B8C\u5168\u6210\u529F\uFF08\u5B58\u5728 ${pullResult.stats.errors} \u4E2A\u9519\u8BEF\uFF09\uFF0C\u8BF7\u5728\u540C\u6B65\u65E5\u5FD7\u4E2D\u68C0\u67E5\u5E76\u6392\u9664\u540E\u518D\u8BD5\uFF0C\u4EE5\u9632\u6570\u636E\u4E22\u5931\u3002`);
     }
@@ -1929,6 +2225,7 @@ var SyncEngine = class {
             path,
             remotePath,
             mtime: localMtime,
+            contentHash: md5(new Uint8Array(buffer)),
             remoteMtime: (res.mtime || Math.floor(Date.now() / 1e3)) * 1e3,
             md5: res.md5 || "",
             size: stat?.size || buffer.byteLength,
@@ -1960,6 +2257,9 @@ var SyncEngine = class {
   async scanLocalFiles() {
     const adapter = this.app.vault.adapter;
     const result = /* @__PURE__ */ new Map();
+    const started = Date.now();
+    let lastUpdate = started;
+    const scanState = this.state === "syncing" ? "syncing" : "diffing";
     const scanDirectory = async (dir) => {
       const list = await adapter.list(dir);
       for (const file of list.files) {
@@ -1967,9 +2267,14 @@ var SyncEngine = class {
           continue;
         }
         const stat = await adapter.stat(file);
+        if (Date.now() - lastUpdate >= 500) {
+          this.setState(scanState, "\u6B63\u5728\u626B\u63CF\u672C\u5730\u6587\u4EF6\uFF1A\u5DF2\u6838\u5BF9 " + result.size + " \u4E2A\uFF0C" + ((Date.now() - started) / 1e3).toFixed(1) + " \u79D2");
+          lastUpdate = Date.now();
+        }
         if (stat && stat.type === "file") {
           result.set(file, {
             path: file,
+            contentHash: md5(new Uint8Array(await adapter.readBinary(file))),
             mtime: stat.mtime,
             size: stat.size
           });
@@ -1988,23 +2293,56 @@ var SyncEngine = class {
     if (settings.syncObsidianConfig && configDir && await adapter.exists(configDir)) {
       await scanDirectory(configDir);
     }
+    this.addLog("info", "\u672C\u5730\u626B\u63CF\u5B8C\u6210\uFF1A" + result.size + " \u4E2A\u6587\u4EF6\uFF0C\u8017\u65F6 " + ((Date.now() - started) / 1e3).toFixed(1) + " \u79D2\uFF08\u5B8C\u6574\u6307\u7EB9\u6821\u9A8C\uFF09");
     return result;
   }
-  async scanRemoteFiles(remoteBasePath) {
+  async scanRemoteFiles(remoteBasePath, allowMissingRoot = false) {
     const result = /* @__PURE__ */ new Map();
     const cleanBase = remoteBasePath.endsWith("/") ? remoteBasePath.slice(0, -1) : remoteBasePath;
-    const items = await this.client.listAll(cleanBase);
+    const started = Date.now();
+    let lastUpdate = 0;
+    let lastProgress;
+    const scanState = this.state === "syncing" ? "syncing" : "diffing";
+    const options = {
+      concurrency: this.getSettings().listingConcurrency ?? 2,
+      shouldSkipDirectory: (path) => this.filter.shouldSkipDirectory(path),
+      onProgress: (progress) => {
+        lastProgress = progress;
+        if (Date.now() - lastUpdate >= 500) {
+          this.setState(scanState, "\u6B63\u5728\u68C0\u7D22\u7F51\u76D8\uFF1A\u76EE\u5F55 " + progress.directoriesScanned + "/" + progress.directoriesQueued + "\uFF0C\u8BF7\u6C42 " + progress.requests + "\uFF0C\u91CD\u8BD5 " + progress.retries + "\uFF0C" + (progress.elapsedMs / 1e3).toFixed(1) + " \u79D2");
+          lastUpdate = Date.now();
+        }
+      }
+    };
+    let items;
+    try {
+      items = await this.client.listAll(cleanBase, allowMissingRoot, options);
+    } catch (error) {
+      this.addLog(
+        "error",
+        "\u4E91\u7AEF\u68C0\u7D22\u672A\u5B8C\u6210\uFF0C\u505C\u6B62\u540C\u6B65\uFF1B\u8017\u65F6 " + ((Date.now() - started) / 1e3).toFixed(1) + " \u79D2",
+        lastProgress ? "\u5DF2\u67E5\u76EE\u5F55 " + lastProgress.directoriesScanned + "/" + lastProgress.directoriesQueued + "\uFF0C\u8BF7\u6C42 " + lastProgress.requests + "\uFF0C\u91CD\u8BD5 " + lastProgress.retries : "\u5C1A\u672A\u53D6\u5F97\u5B8C\u6574\u5217\u8868"
+      );
+      throw error;
+    }
+    this.addLog(
+      "info",
+      "\u4E91\u7AEF\u68C0\u7D22\u5B8C\u6210\uFF1A\u8017\u65F6 " + ((Date.now() - started) / 1e3).toFixed(1) + " \u79D2",
+      lastProgress ? "\u76EE\u5F55 " + lastProgress.directoriesScanned + "\uFF0C\u8DF3\u8FC7\u76EE\u5F55 " + lastProgress.directoriesSkipped + "\uFF0C\u8BF7\u6C42 " + lastProgress.requests + "\uFF0C\u91CD\u8BD5 " + lastProgress.retries + "\uFF0C\u68C0\u7D22\u5E76\u53D1 " + lastProgress.concurrency : void 0
+    );
     for (const item of items) {
       if (item.isdir === 1) {
         continue;
       }
       let relativePath = item.path;
+      if (!relativePath.startsWith(cleanBase + "/")) throw new Error("\u4E91\u7AEF\u8FD4\u56DE\u540C\u6B65\u76EE\u5F55\u5916\u7684\u8DEF\u5F84\uFF0C\u505C\u6B62\u540C\u6B65");
       if (relativePath.startsWith(cleanBase)) {
         relativePath = relativePath.slice(cleanBase.length);
       }
       if (relativePath.startsWith("/")) {
         relativePath = relativePath.slice(1);
       }
+      if (relativePath.split("/").some((part) => !part || part === "." || part === "..") || relativePath.includes("\\")) throw new Error("\u4E91\u7AEF\u8DEF\u5F84\u65E0\u6548\uFF0C\u505C\u6B62\u540C\u6B65");
       if (this.filter.shouldIgnore(relativePath)) {
         continue;
       }
@@ -2147,13 +2485,112 @@ var SyncLogModal = class extends import_obsidian7.Modal {
   }
 };
 
+// src/ui/mirrorConfirmModal.ts
+var import_obsidian8 = require("obsidian");
+function confirmMirror(app, plans) {
+  return new Promise((resolve) => {
+    class MirrorModal extends import_obsidian8.Modal {
+      constructor() {
+        super(...arguments);
+        this.accepted = false;
+      }
+      onOpen() {
+        this.titleEl.setText("\u786E\u8BA4\u8986\u76D6\uFF0F\u8FD8\u539F\u64CD\u4F5C");
+        const transfers = plans.filter((p) => p.action === "UPLOAD" || p.action === "DOWNLOAD").length;
+        const deletions = plans.filter((p) => p.action === "DELETE_LOCAL" || p.action === "DELETE_REMOTE").length;
+        this.contentEl.createEl("p", { text: `\u5C06\u4F20\u8F93\u6216\u8986\u76D6 ${transfers} \u4E2A\u6587\u4EF6\uFF0C\u5220\u9664 ${deletions} \u4E2A\u76EE\u6807\u7AEF\u6587\u4EF6\u3002\u76EE\u6807\u7AEF\u72EC\u7ACB\u4FEE\u6539\u4F1A\u88AB\u66FF\u6362\u3002\u8BF7\u6838\u5BF9\u4EE5\u4E0B\u5B8C\u6574\u6E05\u5355\u3002` });
+        const list = this.contentEl.createEl("pre", { cls: "baidu-sync-plan-preview" });
+        const labels = { UPLOAD: "\u4E0A\u4F20/\u8986\u76D6\u4E91\u7AEF", DOWNLOAD: "\u4E0B\u8F7D/\u8986\u76D6\u672C\u5730", DELETE_LOCAL: "\u5220\u9664\u672C\u5730", DELETE_REMOTE: "\u5220\u9664\u4E91\u7AEF", CLEAN_MANIFEST: "\u6E05\u7406\u5386\u53F2", SKIP: "\u8DF3\u8FC7" };
+        list.setText(plans.map((p) => `${labels[p.action]}\uFF1A${p.path}`).join("\n"));
+        new import_obsidian8.Setting(this.contentEl).addButton((b) => b.setButtonText("\u53D6\u6D88").onClick(() => this.close())).addButton((b) => b.setButtonText("\u786E\u8BA4\u6267\u884C").setWarning().onClick(() => {
+          this.accepted = true;
+          this.close();
+        }));
+      }
+      onClose() {
+        this.contentEl.empty();
+        resolve(this.accepted);
+      }
+    }
+    new MirrorModal(app).open();
+  });
+}
+
+// src/ui/policyModal.ts
+var import_obsidian9 = require("obsidian");
+function choosePolicy(app, initial) {
+  return new Promise((resolve) => {
+    class PolicyModal extends import_obsidian9.Modal {
+      constructor() {
+        super(...arguments);
+        this.selected = initial;
+        this.result = null;
+      }
+      onOpen() {
+        this.titleEl.setText("\u9009\u62E9\u672C\u6B21\u540C\u6B65\u65B9\u5F0F");
+        this.contentEl.createEl("p", { text: "\u4EC5\u5BF9\u672C\u6B21\u624B\u52A8\u540C\u6B65\u751F\u6548\uFF0C\u4E0D\u6539\u53D8\u81EA\u52A8\u540C\u6B65\u65B9\u5411\u3002\u666E\u901A\u5355\u5411\u4FDD\u7559\u76EE\u6807\u7AEF\u72EC\u7ACB\u4FEE\u6539\uFF1B\u8986\u76D6/\u8FD8\u539F\u53EF\u80FD\u5220\u9664\u76EE\u6807\u7AEF\u6587\u4EF6\uFF0C\u4E0B\u4E00\u6B65\u4F1A\u5C55\u793A\u6E05\u5355\u3002" });
+        new import_obsidian9.Setting(this.contentEl).setName("\u672C\u6B21\u540C\u6B65\u65B9\u5F0F").addDropdown((d) => d.addOptions(SYNC_POLICIES).setValue(this.selected).onChange((value) => {
+          if (isSyncPolicy(value)) this.selected = value;
+        }));
+        new import_obsidian9.Setting(this.contentEl).addButton((b) => b.setButtonText("\u53D6\u6D88").onClick(() => this.close())).addButton((b) => b.setButtonText("\u7EE7\u7EED").setCta().onClick(() => {
+          this.result = this.selected;
+          this.close();
+        }));
+      }
+      onClose() {
+        this.contentEl.empty();
+        resolve(this.result);
+      }
+    }
+    new PolicyModal(app).open();
+  });
+}
+
+// src/sync/changeScheduler.ts
+var ChangeScheduler = class {
+  constructor(enabled, busy, run, delay) {
+    this.enabled = enabled;
+    this.busy = busy;
+    this.run = run;
+    this.delay = delay;
+    this.dirty = false;
+    this.disposed = false;
+  }
+  changed() {
+    if (this.disposed || !this.enabled()) return;
+    this.dirty = true;
+    this.idle();
+  }
+  idle() {
+    if (this.disposed || !this.dirty || !this.enabled() || this.busy()) return;
+    if (this.timer !== void 0) clearTimeout(this.timer);
+    this.timer = setTimeout(() => {
+      void this.flush();
+    }, this.delay());
+  }
+  async flush() {
+    this.timer = void 0;
+    if (this.disposed || !this.enabled() || this.busy()) return;
+    this.dirty = false;
+    try {
+      const result = await this.run();
+      if (!result.success) this.dirty = true;
+    } catch {
+      this.dirty = true;
+    }
+  }
+  dispose() {
+    this.disposed = true;
+    if (this.timer !== void 0) clearTimeout(this.timer);
+  }
+};
+
 // src/main.ts
-var BaiduSyncPlugin = class extends import_obsidian8.Plugin {
+var BaiduSyncPlugin = class extends import_obsidian10.Plugin {
   constructor() {
     super(...arguments);
     this.settings = DEFAULT_SETTINGS;
     this.intervalId = null;
-    this.saveDebounceTimer = null;
     this.ribbonIconEl = null;
   }
   async onload() {
@@ -2177,22 +2614,25 @@ var BaiduSyncPlugin = class extends import_obsidian8.Plugin {
         await this.saveData(this.settings);
       },
       this.client,
-      this.manifestMgr
+      this.manifestMgr,
+      (plans) => confirmMirror(this.app, plans),
+      (initial) => choosePolicy(this.app, initial)
     );
     const statusBarItem = this.addStatusBarItem();
     this.statusBar = new StatusBarManager(statusBarItem, this.engine, () => {
       new SyncLogModal(this.app, this.engine).open();
     });
     this.ribbonIconEl = this.addRibbonIcon("cloud", "\u767E\u5EA6\u7F51\u76D8\u540C\u6B65", async () => {
-      new import_obsidian8.Notice("\u6B63\u5728\u542F\u52A8\u767E\u5EA6\u7F51\u76D8\u540C\u6B65...");
+      new import_obsidian10.Notice("\u6B63\u5728\u542F\u52A8\u767E\u5EA6\u7F51\u76D8\u540C\u6B65...");
       const res = await this.engine.startSync(false);
       if (res.success) {
-        new import_obsidian8.Notice("\u767E\u5EA6\u7F51\u76D8\u540C\u6B65\u5B8C\u6210\uFF01");
-      } else {
-        new import_obsidian8.Notice("\u767E\u5EA6\u7F51\u76D8\u540C\u6B65\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u540C\u6B65\u65E5\u5FD7");
+        new import_obsidian10.Notice("\u767E\u5EA6\u7F51\u76D8\u540C\u6B65\u5B8C\u6210\uFF01");
+      } else if (!res.cancelled) {
+        new import_obsidian10.Notice("\u767E\u5EA6\u7F51\u76D8\u540C\u6B65\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u540C\u6B65\u65E5\u5FD7");
       }
     });
     this.engine.onStateChange((state) => {
+      if (state === "idle") this.changes?.idle();
       if (this.ribbonIconEl) {
         if (state === "syncing" || state === "diffing" || state === "preparing") {
           this.ribbonIconEl.addClass("baidu-sync-spinning");
@@ -2205,7 +2645,7 @@ var BaiduSyncPlugin = class extends import_obsidian8.Plugin {
       id: "baidu-sync-now",
       name: "\u7ACB\u5373\u6267\u884C\u540C\u6B65 (Sync Now)",
       callback: async () => {
-        new import_obsidian8.Notice("\u6B63\u5728\u542F\u52A8\u767E\u5EA6\u7F51\u76D8\u540C\u6B65...");
+        new import_obsidian10.Notice("\u6B63\u5728\u542F\u52A8\u767E\u5EA6\u7F51\u76D8\u540C\u6B65...");
         await this.engine.startSync(false);
       }
     });
@@ -2224,10 +2664,7 @@ var BaiduSyncPlugin = class extends import_obsidian8.Plugin {
       window.clearInterval(this.intervalId);
       this.intervalId = null;
     }
-    if (this.saveDebounceTimer !== null) {
-      window.clearTimeout(this.saveDebounceTimer);
-      this.saveDebounceTimer = null;
-    }
+    this.changes?.dispose();
   }
   async loadSettings() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
@@ -2250,6 +2687,12 @@ var BaiduSyncPlugin = class extends import_obsidian8.Plugin {
     }
   }
   setupTriggers() {
+    this.changes = new ChangeScheduler(
+      () => this.settings.syncOnSave && !!this.settings.accessToken && !isMirrorPolicy(this.settings.syncPolicy),
+      () => this.engine.isSyncing(),
+      () => this.engine.startSync(true),
+      () => (this.settings.syncDebounceSeconds || 5) * 1e3
+    );
     if (this.settings.syncOnStartup && this.settings.accessToken) {
       window.setTimeout(async () => {
         await this.engine.startSync(true);
@@ -2258,18 +2701,12 @@ var BaiduSyncPlugin = class extends import_obsidian8.Plugin {
     this.resetInterval();
     const onVaultChange = (file) => {
       if (!this.settings.syncOnSave || !this.settings.accessToken) return;
-      if (this.engine.isSyncing()) return;
       if (file.path.includes("sync_manifest.json") || file.path.includes("workspace")) return;
-      if (this.saveDebounceTimer !== null) {
-        window.clearTimeout(this.saveDebounceTimer);
-      }
-      const debounceMs = (this.settings.syncDebounceSeconds || 5) * 1e3;
-      this.saveDebounceTimer = window.setTimeout(async () => {
-        await this.engine.startSync(true);
-      }, debounceMs);
+      this.changes?.changed();
     };
     this.registerEvent(this.app.vault.on("modify", onVaultChange));
     this.registerEvent(this.app.vault.on("create", onVaultChange));
     this.registerEvent(this.app.vault.on("delete", onVaultChange));
+    this.registerEvent(this.app.vault.on("rename", onVaultChange));
   }
 };

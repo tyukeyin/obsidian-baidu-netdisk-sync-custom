@@ -1,3 +1,4 @@
+import { md5 } from "../crypto/md5";
 import { App, TFile } from "obsidian";
 import { BaiduSyncSettings } from "../settings/settings";
 import { BaiduClient } from "../baidu/client";
@@ -6,6 +7,7 @@ import { BaiduDownloader } from "../baidu/downloader";
 import { ManifestManager } from "./manifest";
 import { SyncFilter } from "./filter";
 import { AsyncQueue } from "./queue";
+import { allowsAction, isSyncPolicy, isMirrorPolicy, SYNC_POLICIES, SyncPolicy } from "./policy";
 import {
   SyncPlanner,
   SyncPlanItem,
@@ -37,7 +39,9 @@ export class SyncEngine {
     private getSettings: () => BaiduSyncSettings,
     private saveSettings: (settings: BaiduSyncSettings) => Promise<void>,
     private client: BaiduClient,
-    private manifest: ManifestManager
+    private manifest: ManifestManager,
+    private approveMirror: (plans: SyncPlanItem[]) => Promise<boolean> = async () => false,
+    private selectPolicy?: (initial: SyncPolicy) => Promise<SyncPolicy | null>
   ) {
     const settings = this.getSettings();
     this.filter = new SyncFilter(settings, this.app.vault.configDir);
@@ -99,13 +103,13 @@ export class SyncEngine {
     }
   }
 
-  async startSync(silent = false): Promise<{ success: boolean; stats: { uploaded: number; downloaded: number; deleted: number; errors: number } }> {
+  async startSync(silent = false, selectForRun = true): Promise<{ success: boolean; cancelled?: boolean; stats: { uploaded: number; downloaded: number; deleted: number; errors: number } }> {
     if (this.state !== "idle" && this.state !== "error") {
       this.addLog("warn", "已有同步任务正在运行，跳过本次触发");
       return { success: false, stats: { uploaded: 0, downloaded: 0, deleted: 0, errors: 0 } };
     }
 
-    const settings = this.getSettings();
+    const settings = { ...this.getSettings() };
     if (!settings.accessToken) {
       this.addLog("error", "未配置百度网盘授权，请先前往设置授权账号");
       this.setState("error", "未授权账号");
@@ -117,8 +121,28 @@ export class SyncEngine {
 
     const stats = { uploaded: 0, downloaded: 0, deleted: 0, errors: 0 };
     const startTime = Date.now();
+    const configuredPolicy = settings.syncPolicy;
 
     try {
+      if (!silent && selectForRun && this.selectPolicy) {
+        this.setState("preparing", "等待选择同步方式...");
+        const initial = isSyncPolicy(settings.lastManualPolicy) ? settings.lastManualPolicy : settings.syncPolicy;
+        const selected = await this.selectPolicy(initial);
+        if (selected === null) {
+          this.setState("idle", "已取消");
+          return { success: false, cancelled: true, stats };
+        }
+        if (!isSyncPolicy(selected)) throw new Error("未知同步策略");
+        settings.syncPolicy = selected;
+        await this.saveSettings({ ...this.getSettings(), lastManualPolicy: selected });
+      }
+      const policy = settings.syncPolicy;
+      if (!isSyncPolicy(policy)) throw new Error("未知同步策略，请在设置中重新选择。");
+      if (silent && isMirrorPolicy(policy)) {
+        this.addLog("info", "覆盖/还原模式仅支持手动同步，已跳过自动触发");
+        return { success: false, cancelled: true, stats };
+      }
+      this.addLog("info", `本轮同步方向：${SYNC_POLICIES[policy]}`);
       this.setState("preparing", "正在加载同步清单...");
       await this.manifest.load();
 
@@ -128,19 +152,57 @@ export class SyncEngine {
 
       // Step 2: Scan remote files
       this.setState("diffing", "正在检索百度网盘文件列表...");
-      const remoteFiles = await this.scanRemoteFiles(settings.remoteBasePath);
+      const remoteFiles = await this.scanRemoteFiles(settings.remoteBasePath,
+        Object.keys(this.manifest.getAll()).length === 0 && policy !== "receive" && policy !== "mirrorReceive");
+
+      // Bootstrap legacy plaintext histories only with evidence of matching bytes.
+      // Never compare plaintext hashes with encrypted remote bytes.
+      if (!settings.enableE2EE) {
+        const history = this.manifest.getAll();
+        for (const [path, local] of localFiles) {
+          const remote = remoteFiles.get(path);
+          const previous = history[path];
+          if (local.contentHash && remote?.md5 && local.contentHash === remote.md5.toLowerCase()) {
+            this.manifest.set({ path, remotePath: remote.remotePath, mtime: local.mtime,
+              remoteMtime: remote.mtime, size: local.size, remoteSize: remote.size,
+              fsId: remote.fsId, md5: remote.md5, contentHash: local.contentHash });
+          } else if (local.contentHash && previous?.md5 && !previous.contentHash &&
+              local.contentHash === previous.md5.toLowerCase()) {
+            this.manifest.set({ ...previous, contentHash: local.contentHash });
+          }
+        }
+      }
 
       // Step 3: Compute diff plan
       this.setState("diffing", "正在对比差异并裁决冲突 (LWW)...");
       const plans = SyncPlanner.plan(
         localFiles,
         remoteFiles,
-        this.manifest.getAll(),
-        settings.remoteBasePath
+        Object.fromEntries(Object.entries(this.manifest.getAll()).filter(([path]) => !this.filter.shouldIgnore(path))),
+        settings.remoteBasePath,
+        policy
       );
 
+      for (const item of plans.filter(p => p.action === "SKIP")) this.addLog("warn", `跳过 ${item.path}：${item.reason}`);
+      const skipped = plans.filter(p => p.action === "SKIP").length;
+      if (skipped) this.addLog("warn", `有 ${skipped} 个文件因目标端变更或缺少历史而保留，未同步；两端不一定一致。`);
+      if (isMirrorPolicy(policy) && plans.length && !(await this.approveMirror(plans))) {
+        this.addLog("info", "已取消覆盖/还原，本轮未传输或删除文件");
+        this.setState("idle", "已取消");
+        return { success: false, cancelled: true, stats };
+      }
+      if (isMirrorPolicy(policy) && plans.length) {
+        const fingerprint = (files: Map<string, LocalFileInfo | RemoteFileInfo>) =>
+          JSON.stringify([...files.entries()].sort(([a], [b]) => a.localeCompare(b)));
+        if (fingerprint(await this.scanLocalFiles()) !== fingerprint(localFiles) ||
+            fingerprint(await this.scanRemoteFiles(settings.remoteBasePath)) !== fingerprint(remoteFiles)) {
+          throw new Error("预览后文件发生变化，已停止执行，请重新同步并核对清单。");
+        }
+      }
+
       if (plans.length === 0) {
-        this.addLog("info", "两端文件已处于最新一致状态，无需传输");
+        await this.manifest.save();
+        this.addLog("info", "当前同步方向下无待执行操作");
         this.setState("idle", "同步完成 (无变动)");
         return { success: true, stats };
       }
@@ -151,10 +213,30 @@ export class SyncEngine {
       this.setState("syncing", `同步中 (0/${plans.length})...`);
       let processed = 0;
 
-      for (const item of plans) {
+      const orderedPlans = [...plans].sort((a, b) =>
+        Number(a.action.startsWith("DELETE") || a.action === "CLEAN_MANIFEST") -
+        Number(b.action.startsWith("DELETE") || b.action === "CLEAN_MANIFEST"));
+      let deletionChecked = false;
+      for (const item of orderedPlans) {
         await this.queue.add(async () => {
           try {
-            await this.executePlanItem(item);
+            if (item.action.startsWith("DELETE") || item.action === "CLEAN_MANIFEST") {
+              if (stats.errors) throw new Error("前序操作失败，保留旧路径，待下次同步重试");
+              if (!deletionChecked) {
+                // Persist new paths before removing any old copy.
+                await this.manifest.save();
+                const freshRemote = await this.scanRemoteFiles(settings.remoteBasePath);
+                for (const removal of orderedPlans.filter(p => p.action.startsWith("DELETE"))) {
+                  const fresh = freshRemote.get(removal.path);
+                  if (removal.action === "DELETE_LOCAL" && fresh) throw new Error("云端路径重新出现，停止清理");
+                  if (removal.action === "DELETE_REMOTE" && (!fresh || fresh.mtime !== removal.remote?.mtime || fresh.size !== removal.remote?.size || fresh.md5 !== removal.remote?.md5)) throw new Error("云端文件发生变化，停止清理");
+                }
+                deletionChecked = true;
+              }
+            }
+            if (this.getSettings().syncPolicy !== configuredPolicy || this.getSettings().remoteBasePath !== settings.remoteBasePath) throw new Error("同步设置已改变，请重新同步");
+            if (!allowsAction(policy, item.action)) throw new Error("同步方向禁止执行此操作");
+            await this.executePlanItem(item, settings);
             if (item.action === "UPLOAD") stats.uploaded++;
             else if (item.action === "DOWNLOAD") stats.downloaded++;
             else if (item.action === "DELETE_LOCAL" || item.action === "DELETE_REMOTE") stats.deleted++;
@@ -175,8 +257,7 @@ export class SyncEngine {
       this.manifest.updateLastSyncTime();
       await this.manifest.save();
 
-      settings.lastSyncTime = Date.now();
-      await this.saveSettings(settings);
+      await this.saveSettings({ ...this.getSettings(), lastSyncTime: Date.now() });
 
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
       const summary = `同步完成！用时 ${elapsed}s | 上传: ${stats.uploaded}, 下载: ${stats.downloaded}, 删除: ${stats.deleted}, 失败: ${stats.errors}`;
@@ -192,16 +273,16 @@ export class SyncEngine {
     }
   }
 
-  private async executePlanItem(item: SyncPlanItem): Promise<void> {
-    const settings = this.getSettings();
+  private async executePlanItem(item: SyncPlanItem, settings: BaiduSyncSettings): Promise<void> {
     const adapter = this.app.vault.adapter;
 
     switch (item.action) {
       case "UPLOAD": {
         if (!(await adapter.exists(item.path))) {
-          return;
+          throw new Error("待上传文件已移动或删除，请重新同步");
         }
         const buffer = await adapter.readBinary(item.path);
+        if (item.local?.contentHash && md5(new Uint8Array(buffer)) !== item.local.contentHash) throw new Error("扫描后本地内容已变化，请重新同步");
         const stat = await adapter.stat(item.path);
         const localMtime = stat?.mtime || Date.now();
 
@@ -214,6 +295,7 @@ export class SyncEngine {
           path: item.path,
           remotePath: item.remotePath,
           mtime: localMtime,
+          contentHash: md5(new Uint8Array(buffer)),
           remoteMtime: (res.mtime || Math.floor(Date.now() / 1000)) * 1000,
           md5: res.md5 || "",
           size: stat?.size || buffer.byteLength,
@@ -234,21 +316,24 @@ export class SyncEngine {
         });
 
         // Ensure parent directory exists
-        const lastSlash = item.path.lastIndexOf("/");
-        if (lastSlash > 0) {
-          const dir = item.path.substring(0, lastSlash);
+        const segments = item.path.split("/");
+        for (let i = 1; i < segments.length; i++) {
+          const dir = segments.slice(0, i).join("/");
           if (!(await adapter.exists(dir))) {
             await adapter.mkdir(dir);
           }
         }
 
+        await this.assertLocalUnchanged(item);
         await adapter.writeBinary(item.path, buffer);
+        if (md5(new Uint8Array(await adapter.readBinary(item.path))) !== md5(new Uint8Array(buffer))) throw new Error("下载文件落盘校验失败，保留旧路径");
         const stat = await adapter.stat(item.path);
 
         this.manifest.set({
           path: item.path,
           remotePath: item.remotePath,
           mtime: stat?.mtime || Date.now(),
+          contentHash: md5(new Uint8Array(buffer)),
           remoteMtime: item.remote.mtime,
           md5: item.remote.md5 || "",
           size: buffer.byteLength,
@@ -260,6 +345,7 @@ export class SyncEngine {
       }
 
       case "DELETE_LOCAL": {
+        await this.assertLocalUnchanged(item);
         if (await adapter.exists(item.path)) {
           const file = this.app.vault.getAbstractFileByPath(item.path);
           if (file && file instanceof TFile) {
@@ -271,10 +357,12 @@ export class SyncEngine {
           this.addLog("info", `移入本地回收站: ${item.path}`);
         }
         this.manifest.delete(item.path);
+        await this.pruneEmptyParents(item.path);
         break;
       }
 
       case "DELETE_REMOTE": {
+        if (await adapter.exists(item.path)) throw new Error("本地路径已重新出现，停止删除云端文件");
         await this.client.deleteFiles([item.remotePath]);
         this.manifest.delete(item.path);
         this.addLog("info", `移入网盘回收站: ${item.path}`);
@@ -291,6 +379,29 @@ export class SyncEngine {
     }
   }
 
+  private async assertLocalUnchanged(item: SyncPlanItem): Promise<void> {
+    const adapter = this.app.vault.adapter;
+    const exists = await adapter.exists(item.path);
+    if (!item.local && exists) throw new Error("本地出现新文件，保留并等待重新同步");
+    if (item.local?.contentHash && (!exists || md5(new Uint8Array(await adapter.readBinary(item.path))) !== item.local.contentHash)) {
+      throw new Error("本地内容已变化，保留并等待重新同步");
+    }
+  }
+
+  private async pruneEmptyParents(path: string): Promise<void> {
+    const adapter = this.app.vault.adapter;
+    let dir = path.slice(0, path.lastIndexOf("/"));
+    if (!path.includes("/")) return;
+    while (dir && !this.filter.shouldIgnore(dir) && dir !== this.app.vault.configDir && !dir.startsWith(this.app.vault.configDir + "/")) {
+      const children = await adapter.list(dir);
+      if (children.files.length || children.folders.length) break;
+      await adapter.rmdir(dir, false);
+      this.addLog("info", `清理旧空目录: ${dir}`);
+      if (!dir.includes("/")) break;
+      dir = dir.slice(0, dir.lastIndexOf("/"));
+    }
+  }
+
   async convertVaultToPlaintext(
     onProgress?: (processed: number, total: number, currentPath: string) => void
   ): Promise<{ success: boolean; total: number; errors: number }> {
@@ -299,12 +410,15 @@ export class SyncEngine {
     }
 
     const settings = this.getSettings();
+    if (settings.syncPolicy !== "bidirectional") {
+      throw new Error("全量解密迁移会读写两端，请先切回双向同步。");
+    }
     if (!settings.accessToken) {
       throw new Error("未配置百度网盘授权，请先前往设置授权账号。");
     }
 
     this.addLog("info", "启动全量解密迁移流程：开始拉取并解密云端全部最新文件确保本地完整...");
-    const pullResult = await this.startSync(false);
+    const pullResult = await this.startSync(false, false);
     if (!pullResult.success && pullResult.stats.errors > 0) {
       throw new Error(`云端预拉取未完全成功（存在 ${pullResult.stats.errors} 个错误），请在同步日志中检查并排除后再试，以防数据丢失。`);
     }
@@ -344,6 +458,7 @@ export class SyncEngine {
             path: path,
             remotePath: remotePath,
             mtime: localMtime,
+          contentHash: md5(new Uint8Array(buffer)),
             remoteMtime: (res.mtime || Math.floor(Date.now() / 1000)) * 1000,
             md5: res.md5 || "",
             size: stat?.size || buffer.byteLength,
@@ -381,6 +496,9 @@ export class SyncEngine {
   private async scanLocalFiles(): Promise<Map<string, LocalFileInfo>> {
     const adapter = this.app.vault.adapter;
     const result = new Map<string, LocalFileInfo>();
+    const started = Date.now();
+    let lastUpdate = started;
+    const scanState: SyncState = this.state === 'syncing' ? 'syncing' : 'diffing';
 
     const scanDirectory = async (dir: string) => {
       const list = await adapter.list(dir);
@@ -390,9 +508,14 @@ export class SyncEngine {
           continue;
         }
         const stat = await adapter.stat(file);
+        if (Date.now() - lastUpdate >= 500) {
+          this.setState(scanState, '正在扫描本地文件：已核对 ' + result.size + ' 个，' + ((Date.now() - started) / 1000).toFixed(1) + ' 秒');
+          lastUpdate = Date.now();
+        }
         if (stat && stat.type === "file") {
           result.set(file, {
             path: file,
+            contentHash: md5(new Uint8Array(await adapter.readBinary(file))),
             mtime: stat.mtime,
             size: stat.size
           });
@@ -417,14 +540,42 @@ export class SyncEngine {
       await scanDirectory(configDir);
     }
 
+    this.addLog('info', '本地扫描完成：' + result.size + ' 个文件，耗时 ' + ((Date.now() - started) / 1000).toFixed(1) + ' 秒（完整指纹校验）');
     return result;
   }
 
-  private async scanRemoteFiles(remoteBasePath: string): Promise<Map<string, RemoteFileInfo>> {
+  private async scanRemoteFiles(remoteBasePath: string, allowMissingRoot = false): Promise<Map<string, RemoteFileInfo>> {
     const result = new Map<string, RemoteFileInfo>();
     const cleanBase = remoteBasePath.endsWith("/") ? remoteBasePath.slice(0, -1) : remoteBasePath;
 
-    const items = await this.client.listAll(cleanBase);
+    const started = Date.now();
+    let lastUpdate = 0;
+    let lastProgress: import('../baidu/client').ListingProgress | undefined;
+    const scanState: SyncState = this.state === 'syncing' ? 'syncing' : 'diffing';
+    const options: import('../baidu/client').ListingOptions = {
+      concurrency: this.getSettings().listingConcurrency ?? 2,
+      shouldSkipDirectory: path => this.filter.shouldSkipDirectory(path),
+      onProgress: progress => {
+        lastProgress = progress;
+        if (Date.now() - lastUpdate >= 500) {
+          this.setState(scanState, '正在检索网盘：目录 ' + progress.directoriesScanned + '/' + progress.directoriesQueued +
+            '，请求 ' + progress.requests + '，重试 ' + progress.retries + '，' + (progress.elapsedMs / 1000).toFixed(1) + ' 秒');
+          lastUpdate = Date.now();
+        }
+      }
+    };
+    let items: Awaited<ReturnType<BaiduClient['listAll']>>;
+    try {
+      items = await this.client.listAll(cleanBase, allowMissingRoot, options);
+    } catch (error) {
+      this.addLog('error', '云端检索未完成，停止同步；耗时 ' + ((Date.now() - started) / 1000).toFixed(1) + ' 秒',
+        lastProgress ? '已查目录 ' + lastProgress.directoriesScanned + '/' + lastProgress.directoriesQueued +
+          '，请求 ' + lastProgress.requests + '，重试 ' + lastProgress.retries : '尚未取得完整列表');
+      throw error;
+    }
+    this.addLog('info', '云端检索完成：耗时 ' + ((Date.now() - started) / 1000).toFixed(1) + ' 秒',
+      lastProgress ? '目录 ' + lastProgress.directoriesScanned + '，跳过目录 ' + lastProgress.directoriesSkipped +
+        '，请求 ' + lastProgress.requests + '，重试 ' + lastProgress.retries + '，检索并发 ' + lastProgress.concurrency : undefined);
 
     for (const item of items) {
       if (item.isdir === 1) {
@@ -432,12 +583,14 @@ export class SyncEngine {
       }
 
       let relativePath = item.path;
+      if (!relativePath.startsWith(cleanBase + "/")) throw new Error("云端返回同步目录外的路径，停止同步");
       if (relativePath.startsWith(cleanBase)) {
         relativePath = relativePath.slice(cleanBase.length);
       }
       if (relativePath.startsWith("/")) {
         relativePath = relativePath.slice(1);
       }
+      if (relativePath.split("/").some(part => !part || part === "." || part === "..") || relativePath.includes("\\")) throw new Error("云端路径无效，停止同步");
 
       if (this.filter.shouldIgnore(relativePath)) {
         continue;
